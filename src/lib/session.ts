@@ -26,7 +26,7 @@ export const getSession = cache(async () => {
     me,
     settings: settings!,
     tz,
-    isManager: me.role === 'manager' || me.role === 'admin',
+    isManager: me.role !== 'agent',
     isAdmin: me.role === 'admin',
   };
 });

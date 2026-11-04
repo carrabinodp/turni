@@ -2,8 +2,10 @@ import { getSession } from '@/lib/session';
 import { addDays, dayStart, fmt, fmtDay, todayIn } from '@/lib/time';
 import { STATUS_LABEL, type Activity, type RequestRow } from '@/lib/types';
 import TimeOffForm from './TimeOffForm';
+import TimeOffBoard, { type TimeOffCard } from './TimeOffBoard';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 export default async function AbsencesPage() {
   const { supabase, me, tz, isManager } = await getSession();
@@ -15,6 +17,57 @@ export default async function AbsencesPage() {
   ]);
   const activities = (acts ?? []) as Activity[];
   const names = new Map((people ?? []).map((p) => [p.id, p.full_name as string]));
+
+  let cards: TimeOffCard[] = [];
+  if (isManager) {
+    const since = addDays(today, -180);
+    const [{ data: all }, { data: ppl }] = await Promise.all([
+      supabase.from('requests').select('*').eq('kind', 'time_off').gte('to_date', since).order('from_date').limit(1000),
+      supabase.from('people').select('id, full_name, email'),
+    ]);
+    const pm = new Map((ppl ?? []).map((p) => [p.id as string, p as { id: string; full_name: string; email: string | null }]));
+    const reqs = (all ?? []) as RequestRow[];
+    const weekdays = (a: string, b: string) => {
+      let n = 0;
+      for (let d = a; d <= b; d = addDays(d, 1)) {
+        const dow = new Date(d + 'T12:00:00Z').getUTCDay();
+        if (dow !== 0 && dow !== 6) n++;
+      }
+      return n;
+    };
+    cards = reqs.map((r) => {
+      const act = activities.find((a) => a.id === r.activity_id);
+      const hours = r.time_from && r.time_to
+        ? Math.round(((Date.parse(`2000-01-01T${r.time_to}`) - Date.parse(`2000-01-01T${r.time_from}`)) / 3600000 + 24) % 24 * 10) / 10
+        : weekdays(r.from_date!, r.to_date!) * 8;
+      const overlap = Array.from(
+        new Set(
+          reqs
+            .filter((o) => o.id !== r.id && o.requester_id !== r.requester_id && ['approved', 'pending_manager'].includes(o.status) && o.from_date! <= r.to_date! && o.to_date! >= r.from_date!)
+            .map((o) => pm.get(o.requester_id)?.full_name ?? ''),
+        ),
+      ).filter(Boolean);
+      return {
+        id: r.id,
+        person: pm.get(r.requester_id)?.full_name ?? '',
+        email: pm.get(r.requester_id)?.email ?? null,
+        type: act?.name ?? 'Assenza',
+        color: act?.color ?? '#cccccc',
+        activity_id: r.activity_id,
+        from: r.from_date!,
+        to: r.to_date!,
+        timeFrom: r.time_from,
+        timeTo: r.time_to,
+        hours,
+        status: r.status,
+        byManager: r.decision_note === 'Inserito dal manager',
+        created_at: r.created_at,
+        note: r.note,
+        decisionNote: r.decision_note === 'Inserito dal manager' ? null : r.decision_note,
+        overlap,
+      };
+    });
+  }
 
   let upcoming: { person: string; act: Activity | undefined; day: string; s: string; e: string }[] = [];
   if (isManager) {
@@ -35,8 +88,10 @@ export default async function AbsencesPage() {
   }
 
   return (
-    <div className="page" style={{ maxWidth: 1000 }}>
-      <h1>Ferie e permessi</h1>
+    <div className="page" style={{ maxWidth: 1300 }}>
+      <h1>{isManager ? 'Richieste di assenza' : 'Ferie e permessi'}</h1>
+      {isManager && <TimeOffBoard cards={cards} tz={tz} types={activities.map((a) => ({ id: a.id, name: a.name }))} />}
+      {isManager && <h2 style={{ marginTop: 10 }}>Le mie richieste</h2>}
       <div className="grid-2">
         <section className="card">
           <div className="card-head"><h2>Nuova richiesta</h2></div>

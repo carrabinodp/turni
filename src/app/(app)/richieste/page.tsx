@@ -1,12 +1,13 @@
 import { getSession } from '@/lib/session';
 import { describeRequest, groupShifts } from '@/lib/shifts';
-import { addDays, dayStart, fmt, todayIn } from '@/lib/time';
+import { addDays, dayStart, fmt, fmtDay, todayIn } from '@/lib/time';
 import { STATUS_LABEL, type Activity, type EventRow, type RequestRow } from '@/lib/types';
 import { ActionButton } from '@/components/ui';
-import DecideBox from './DecideBox';
+import RequestsTable, { type ReqRow } from './RequestsTable';
 import { cancel, respond, take } from './actions';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 const PILL: Record<string, string> = {
   pending_peer: 'pill pill-warn', open: 'pill pill-info', pending_manager: 'pill pill-warn',
@@ -15,7 +16,7 @@ const PILL: Record<string, string> = {
 
 export default async function RequestsPage() {
   const { supabase, me, tz, isManager } = await getSession();
-  const since = new Date(Date.now() - 45 * 86400000).toISOString();
+  const since = new Date(Date.now() - 90 * 86400000).toISOString();
 
   const [{ data: reqData }, { data: peopleData }, { data: actData }] = await Promise.all([
     supabase.from('requests').select('*').or(`status.in.(pending_peer,open,pending_manager),created_at.gte.${since}`).order('created_at', { ascending: false }).limit(300),
@@ -42,10 +43,14 @@ export default async function RequestsPage() {
   const desc = (r: RequestRow) => describeRequest(r, names, acts, shifts, tz);
 
   const toDecide = isManager ? requests.filter((r) => r.status === 'pending_manager') : [];
+  const datesOf = (r: RequestRow) => {
+    if (r.kind === 'time_off') return r.from_date === r.to_date ? fmtDay(r.from_date!, 'EEE d MMM') : `${fmtDay(r.from_date!, 'd MMM')} – ${fmtDay(r.to_date!, 'd MMM')}`;
+    if (r.kind === 'swap' && r.day_b && r.day_b !== r.day_a) return `${fmtDay(r.day_a!, 'EEE d MMM')}, ${fmtDay(r.day_b, 'EEE d MMM')}`;
+    return fmtDay(r.day_a!, 'EEE d MMM');
+  };
   const forMe = requests.filter((r) => r.status === 'pending_peer' && r.target_id === me.id);
   const board = requests.filter((r) => r.status === 'open' && r.requester_id !== me.id && r.day_a! >= todayIn(tz));
   const mine = requests.filter((r) => r.requester_id === me.id || (r.target_id === me.id && r.status !== 'pending_peer'));
-  const history = isManager ? requests.filter((r) => ['approved', 'rejected'].includes(r.status)).slice(0, 30) : [];
 
   // anteprima regole per le richieste da approvare
   const previews = new Map<string, string[]>();
@@ -59,32 +64,32 @@ export default async function RequestsPage() {
   const Note = ({ r }: { r: RequestRow }) => (r.note ? <div className="small muted">“{r.note}”</div> : null);
 
   return (
-    <div className="page" style={{ maxWidth: 1100 }}>
+    <div className="page" style={{ maxWidth: 1300 }}>
       <div className="page-head">
-        <h1>Richieste</h1>
+        <h1>{isManager ? 'Richieste di modifica turni' : 'Richieste'}</h1>
         <a className="btn btn-primary" href="/i-miei-turni">Nuovo scambio o cessione</a>
       </div>
 
       {isManager && (
-        <section className="card">
-          <div className="card-head"><h2>Da approvare</h2>{toDecide.length > 0 && <span className="pill pill-warn">{toDecide.length}</span>}</div>
-          {toDecide.length === 0 ? (
-            <div className="empty">Nessuna richiesta in attesa.</div>
-          ) : (
-            <div className="card-body">
-              {toDecide.map((r) => (
-                <div key={r.id} className="req">
-                  <div>
-                    <b>{desc(r)}</b>
-                    <Note r={r} />
-                    <div className="small muted">Richiesta il {fmt(r.created_at, tz, "d MMM 'alle' HH:mm")}</div>
-                  </div>
-                  <DecideBox id={r.id} issues={previews.get(r.id) ?? []} />
-                </div>
-              ))}
-            </div>
+        <RequestsTable
+          tz={tz}
+          rows={requests.filter((r) => r.kind !== 'time_off').map(
+            (r): ReqRow => ({
+              id: r.id,
+              kind: r.kind,
+              status: r.status,
+              by: names.get(r.requester_id) ?? '',
+              created_at: r.created_at,
+              dates: datesOf(r),
+              firstDay: r.day_a ?? r.from_date ?? '',
+              description: desc(r),
+              note: r.note,
+              issues: previews.get(r.id) ?? [],
+              decidedBy: r.decided_by ? names.get(r.decided_by) ?? null : null,
+              decisionNote: r.decision_note,
+            }),
           )}
-        </section>
+        />
       )}
 
       <div className="grid-2">
@@ -145,27 +150,7 @@ export default async function RequestsPage() {
         )}
       </section>
 
-      {isManager && history.length > 0 && (
-        <section className="card">
-          <div className="card-head"><h2>Decise di recente</h2></div>
-          <div className="table-wrap">
-            <table className="table">
-              <thead><tr><th>Richiesta</th><th>Esito</th><th>Da</th><th>Quando</th></tr></thead>
-              <tbody>
-                {history.map((r) => (
-                  <tr key={r.id}>
-                    <td>{desc(r)}</td>
-                    <td><span className={PILL[r.status]}>{STATUS_LABEL[r.status]}</span></td>
-                    <td>{names.get(r.decided_by ?? '') ?? ''}</td>
-                    <td className="small muted">{r.decided_at ? fmt(r.decided_at, tz, 'd MMM HH:mm') : ''}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-      <style>{`.req{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding-bottom:12px;border-bottom:1px solid var(--line-2)}.req:last-child{border-bottom:0;padding-bottom:0}.req > div:first-child{min-width:0;flex:1 1 320px}`}</style>
+      <style dangerouslySetInnerHTML={{ __html: `.req{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding-bottom:12px;border-bottom:1px solid var(--line-2)}.req:last-child{border-bottom:0;padding-bottom:0}.req > div:first-child{min-width:0;flex:1 1 320px}` }} />
     </div>
   );
 }

@@ -211,3 +211,13 @@ test('pause automatiche', async () => {
   assert.deepEqual(out.filter((x) => x.person_id === 'c').map((x) => new Date(x.s).toISOString().slice(11, 16)), ['15:45']);
   assert.equal(out.filter((x) => x.person_id === 'd').length, 0);
 });
+
+test('token del calendario cifrato e decifrabile', async () => {
+  process.env.CALENDAR_TOKEN_KEY = 'chiave-di-prova';
+  const { encrypt, decrypt } = await import('../../src/lib/gcal');
+  const blob = encrypt('1//0refresh-token');
+  assert.ok(!blob.includes('refresh'), 'non in chiaro');
+  assert.equal(decrypt(blob), '1//0refresh-token');
+  process.env.CALENDAR_TOKEN_KEY = 'altra-chiave';
+  assert.throws(() => decrypt(blob), 'chiave sbagliata non decifra');
+});

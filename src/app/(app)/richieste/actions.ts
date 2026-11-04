@@ -2,6 +2,7 @@
 import { revalidatePath } from 'next/cache';
 import { getSession } from '@/lib/session';
 import { allActiveIds, managerIds, notify } from '@/lib/notify';
+import { syncCalendars } from '@/lib/gcal';
 import { fmtDay } from '@/lib/time';
 import { firstName } from '@/lib/names';
 import type { RequestRow } from '@/lib/types';
@@ -143,5 +144,33 @@ export async function decide(id: string, approve: boolean, note: string): Promis
     body: note ? `Nota del manager: ${note}` : approve ? 'I turni sono già aggiornati.' : undefined,
     url: '/i-miei-turni',
   });
+  if (approve) await syncCalendars([r.requester_id, r.target_id]);
   return done(approve ? 'Approvata: turni aggiornati' : 'Richiesta rifiutata');
+}
+
+export async function createChange(day: string, note: string): Promise<Res> {
+  const { supabase, me } = await getSession();
+  const { error } = await supabase.rpc('request_change', { p_day: day, p_note: note });
+  if (error) return { ok: false, error: error.message };
+  await notify((await managerIds()).filter((id) => id !== me.id), {
+    title: `Richiesta di modifica da ${firstName(me.full_name)}`,
+    body: `${fmtDay(day, 'EEEE d MMM')}: ${note}`,
+    url: '/richieste',
+  });
+  return done('Richiesta inviata ai manager');
+}
+
+export async function decideMany(ids: string[], approve: boolean, note: string): Promise<Res> {
+  let ok = 0;
+  const errors: string[] = [];
+  for (const id of ids) {
+    const r = await decide(id, approve, note);
+    if (r.ok) ok++;
+    else errors.push(r.error);
+  }
+  if (!ok) return { ok: false, error: errors[0] ?? 'Nessuna richiesta gestita' };
+  return {
+    ok: true,
+    message: `${ok} ${approve ? 'approvate' : 'rifiutate'}${errors.length ? `, ${errors.length} non gestite (es. ${errors[0]})` : ''}`,
+  };
 }

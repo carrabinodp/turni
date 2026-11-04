@@ -13,7 +13,7 @@ export default async function TeamPage() {
     <div className="page" style={{ maxWidth: 1150 }}>
       <div className="page-head">
         <div>
-          <h1>Team</h1>
+          <h1>Persone</h1>
           <p className="muted" style={{ margin: '4px 0 0' }}>
             {people.filter((p) => p.active).length} persone attive{pending ? ` · ${pending} non ancora registrate` : ''}. I colleghi entrano da soli con l’email aziendale:
             il profilo si collega per email o per nome e cognome.

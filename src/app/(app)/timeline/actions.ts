@@ -2,6 +2,7 @@
 import { revalidatePath } from 'next/cache';
 import { getSession } from '@/lib/session';
 import { notify } from '@/lib/notify';
+import { syncCalendars } from '@/lib/gcal';
 import { fmtDay } from '@/lib/time';
 import type { ActionResult, SavePayload } from '@/components/timeline/Timeline';
 import type { AbsenceInput, SwapInput } from '@/components/timeline/ManagerDialogs';
@@ -36,6 +37,7 @@ export async function saveScheduleAction(p: SavePayload): Promise<ActionResult> 
       });
     }
   }
+  await syncCalendars(data.affected ?? []);
   revalidatePath('/timeline');
   const n = (data?.inserted ?? 0) + (data?.updated ?? 0) + (data?.deleted ?? 0) + nMarks;
   return { ok: true, message: `Salvate ${n} modifiche` };
@@ -53,6 +55,7 @@ export async function publishWeekAction(week: string, publish: boolean): Promise
       url: `/i-miei-turni?w=${week}`,
     });
   }
+  await syncCalendars((data ?? []) as string[]); // anche il ritiro toglie i turni dai calendari
   revalidatePath('/timeline');
   return { ok: true, message: publish ? 'Settimana pubblicata e team avvisato' : 'Settimana tornata in bozza' };
 }
@@ -83,6 +86,7 @@ export async function managerTimeOffAction(p: AbsenceInput): Promise<ActionResul
       url: '/i-miei-turni',
     });
   }
+  await syncCalendars([r.requester_id]);
   revalidatePath('/timeline');
   return { ok: true, message: `${act?.name ?? 'Assenza'} inserita` };
 }
@@ -104,6 +108,14 @@ export async function managerSwapAction(p: SwapInput): Promise<ActionResult> {
     body: p.note ? `${body}\nNota: ${p.note}` : body,
     url: '/i-miei-turni',
   });
+  await syncCalendars([p.person_a, p.person_b]);
   revalidatePath('/timeline');
   return { ok: true, message: r.kind === 'swap' ? 'Turni scambiati' : 'Turno spostato' };
+}
+
+export async function eventHistoryAction(eventId: string) {
+  const { supabase, isManager } = await getSession();
+  if (!isManager) return [];
+  const { data } = await supabase.rpc('event_history', { p_event: eventId });
+  return (data ?? []) as { at: string; actor: string; action: string; before: Record<string, unknown> | null; after: Record<string, unknown> | null }[];
 }

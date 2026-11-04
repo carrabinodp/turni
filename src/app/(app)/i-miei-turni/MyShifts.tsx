@@ -114,7 +114,7 @@ export default function MyShifts(props: {
         />
       )}
 
-      <style>{`
+      <style dangerouslySetInnerHTML={{ __html: `
         .day{padding:14px 16px;border-bottom:1px solid var(--line-2);display:grid;gap:8px}
         .day:last-child{border-bottom:0}
         .day.today{background:#fbfcff}
@@ -124,12 +124,12 @@ export default function MyShifts(props: {
         .opts{display:grid;gap:6px;max-height:260px;overflow:auto}
         .opt{display:flex;justify-content:space-between;gap:10px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;cursor:pointer;background:#fff;font:inherit;text-align:left}
         .opt[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft)}
-      `}</style>
+      ` }} />
     </div>
   );
 }
 
-function SwapDialog(props: {
+export function SwapDialog(props: {
   mode: 'swap' | 'give';
   day: string;
   myText: string;

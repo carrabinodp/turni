@@ -14,11 +14,11 @@ export default function LoginPage({ searchParams }: { searchParams: { next?: str
         {searchParams.error && <div className="alert alert-bad">{searchParams.error}</div>}
         <LoginButton next={searchParams.next} />
       </div>
-      <style>{`
+      <style dangerouslySetInnerHTML={{ __html: `
         .auth{min-height:100%;display:grid;place-items:center;padding:24px max(16px,env(safe-area-inset-left,0px));background:var(--side)}
         .auth-card{width:100%;max-width:380px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:28px;display:grid;gap:14px}
         .auth-card p{margin:0}
-      `}</style>
+      ` }} />
     </main>
   );
 }

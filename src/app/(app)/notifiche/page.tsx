@@ -1,7 +1,6 @@
 import { getSession } from '@/lib/session';
 import { fmt } from '@/lib/time';
-import PushToggle from './PushToggle';
-import { markAllRead, setEmailPref } from './actions';
+import { markAllRead } from './actions';
 import { ActionButton } from '@/components/ui';
 
 export const dynamic = 'force-dynamic';
@@ -18,21 +17,7 @@ export default async function NotificationsPage() {
         <h1>Notifiche</h1>
         {unread > 0 && <ActionButton action={markAllRead}>Segna tutte come lette</ActionButton>}
       </div>
-      <section className="card">
-        <div className="card-head"><h2>Come ricevere gli avvisi</h2></div>
-        <div className="card-body">
-          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <b>Email</b>
-              <div className="small muted">{me.email}</div>
-            </div>
-            <ActionButton className="btn btn-sm" action={setEmailPref.bind(null, !me.email_notifications)}>
-              {me.email_notifications ? 'Attive · Disattiva' : 'Disattivate · Attiva'}
-            </ActionButton>
-          </div>
-          <PushToggle vapidKey={process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? ''} />
-        </div>
-      </section>
+      <p className="muted" style={{ margin: 0 }}>Email, notifiche sul telefono e Google Calendar si impostano in <a href="/impostazioni">Impostazioni</a>.</p>
       <section className="card">
         {list.length === 0 ? <div className="empty">Nessuna notifica.</div> : (
           <div>
@@ -48,7 +33,7 @@ export default async function NotificationsPage() {
           </div>
         )}
       </section>
-      <style>{`.notif{display:flex;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line-2);color:var(--ink);text-decoration:none}.notif:hover{background:var(--hover);text-decoration:none}.notif:last-child{border-bottom:0}.notif[data-unread]{background:#f7f9ff}.notif[data-unread] b::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:7px;vertical-align:middle}`}</style>
+      <style dangerouslySetInnerHTML={{ __html: `.notif{display:flex;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line-2);color:var(--ink);text-decoration:none}.notif:hover{background:var(--hover);text-decoration:none}.notif:last-child{border-bottom:0}.notif[data-unread]{background:#f7f9ff}.notif[data-unread] b::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:7px;vertical-align:middle}` }} />
     </div>
   );
 }

@@ -2,6 +2,7 @@
 import { revalidatePath } from 'next/cache';
 import { getSession } from '@/lib/session';
 import { notify } from '@/lib/notify';
+import { syncCalendars } from '@/lib/gcal';
 import { addDays, fmtDay, weekStart } from '@/lib/time';
 import type { ImportPayload, ImportResult } from '@/components/import/Importer';
 
@@ -48,6 +49,7 @@ export async function importAction(p: ImportPayload): Promise<ImportResult> {
       url: '/i-miei-turni',
     });
   }
+  await syncCalendars((data.persons ?? []) as string[]);
   revalidatePath('/timeline');
   return { ok: true, inserted: data.inserted, deleted: data.deleted, people_created: data.people_created, marks: data.marks ?? 0, published };
 }

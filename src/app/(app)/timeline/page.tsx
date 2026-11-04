@@ -3,9 +3,10 @@ import Timeline from '@/components/timeline/Timeline';
 import { addDays, dayStart, diffDays, isValidDate, todayIn, weekStart } from '@/lib/time';
 import type { Activity, DayMark, DayType, EventRow, Person } from '@/lib/types';
 import type { BreakRule } from '@/lib/breaks';
-import { copyWeekAction, managerSwapAction, managerTimeOffAction, publishWeekAction, saveScheduleAction } from './actions';
+import { copyWeekAction, eventHistoryAction, managerSwapAction, managerTimeOffAction, publishWeekAction, saveScheduleAction } from './actions';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 export default async function TimelinePage({ searchParams }: { searchParams: { d?: string; v?: string; to?: string } }) {
   const { supabase, me, tz, isManager, settings } = await getSession();
@@ -19,11 +20,11 @@ export default async function TimelinePage({ searchParams }: { searchParams: { d
   const endIso = new Date(dayStart(end, tz)).toISOString();
 
   const [people, activities, events, weeks, dayTypes, marks] = await Promise.all([
-    supabase.from('people').select('id, full_name, contract, user_id').eq('active', true).order('full_name'),
+    supabase.from('people').select('id, full_name, contract, user_id, team, channels').eq('active', true).order('full_name'),
     supabase.from('activity_types').select('*').order('sort_order'),
     supabase
       .from('events')
-      .select('id, person_id, activity_id, starts_at, ends_at, note, source, updated_at')
+      .select('id, person_id, activity_id, starts_at, ends_at, note, source, updated_at, updated_by')
       .lt('starts_at', endIso)
       .gt('ends_at', startIso)
       .order('starts_at')
@@ -47,7 +48,7 @@ export default async function TimelinePage({ searchParams }: { searchParams: { d
       date={date}
       to={view === 'custom' ? to : undefined}
       tz={tz}
-      people={(people.data ?? []) as Pick<Person, 'id' | 'full_name' | 'contract' | 'user_id'>[]}
+      people={(people.data ?? []) as (Pick<Person, 'id' | 'full_name' | 'contract' | 'user_id' | 'team' | 'channels'>)[]}
       activities={(activities.data ?? []) as Activity[]}
       events={evs}
       dayTypes={(dayTypes.data ?? []) as DayType[]}
@@ -64,6 +65,7 @@ export default async function TimelinePage({ searchParams }: { searchParams: { d
       onCopyWeek={copyWeekAction}
       onTimeOff={isManager ? managerTimeOffAction : undefined}
       onSwap={isManager ? managerSwapAction : undefined}
+      onHistory={isManager ? eventHistoryAction : undefined}
     />
   );
 }

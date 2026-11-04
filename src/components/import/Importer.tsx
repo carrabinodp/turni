@@ -634,14 +634,14 @@ export default function Importer(props: {
         </>
       )}
 
-      <style>{`
+      <style dangerouslySetInnerHTML={{ __html: `
         .drop{display:grid;justify-items:center;gap:4px;padding:26px 16px;border:1.5px dashed var(--line);border-radius:10px;cursor:pointer;text-align:center;background:#fbfbfc}
         .drop[data-drag],.drop:hover{border-color:var(--accent);background:var(--accent-soft)}
         .drop input{position:absolute;width:1px;height:1px;opacity:0}
         .drop:focus-within{outline:2px solid var(--accent)}
         details summary{cursor:pointer}
         code{background:var(--hover);padding:1px 5px;border-radius:4px;font-size:12.5px}
-      `}</style>
+      ` }} />
     </div>
   );
 }

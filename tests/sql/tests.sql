@@ -293,4 +293,42 @@ do $$ begin
 end $$;
 reset role;
 
+-- ---- 0003: team lead, richiesta di modifica, storico blocco
+select set_config('app.system', 'on', false);
+update people set role = 'team_lead' where email = 'marco.bianchi@azienda.it';
+select set_config('app.system', 'off', false);
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);
+set role authenticated;
+do $$
+declare e uuid;
+begin
+  assert is_manager(), 'team lead = poteri da manager';
+  perform save_schedule(jsonb_build_object('upserts', jsonb_build_array(jsonb_build_object(
+    'person_id', current_person_id(), 'activity_id', (select id from activity_types where name='Chat'),
+    'starts_at', '2026-12-01 09:00+01', 'ends_at', '2026-12-01 10:00+01'))));
+  select id into e from events where starts_at = '2026-12-01 09:00+01';
+  assert (select updated_by from events where id = e) = current_person_id(), 'ultima modifica registrata';
+  assert (select count(*) from event_history(e)) = 1, 'storico del blocco';
+end $$;
+reset role;
+insert into calendar_links (person_id, refresh_token) select id, 'segreto' from people where email = 'giulia.rossi@azienda.it';
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+set role authenticated;
+do $$
+declare r requests;
+begin
+  r := request_change('2026-12-02', 'Posso entrare alle 10?');
+  assert r.kind::text = 'change' and r.status = 'pending_manager', 'richiesta di modifica';
+  assert (select mode from my_calendar_status()) = 'primary', 'stato calendario visibile';
+  assert (select count(*) from calendar_links) = 0, 'token non leggibili dai client';
+end $$;
+reset role;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);
+set role authenticated;
+do $$ begin
+  perform request_decide((select id from requests where kind::text = 'change'), true, 'Ok');
+  assert (select status from requests where kind::text = 'change') = 'approved', 'modifica approvata';
+end $$;
+reset role;
+
 select 'TUTTI I TEST SQL PASSATI';

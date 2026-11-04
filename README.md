@@ -11,7 +11,10 @@ Sito interno per pianificare turni e attività del team, in stile "staffing time
 - **Controllo del riposo minimo** (11 h, configurabile) sul server: uno scambio che lo viola non passa.
 - **Bozza / pubblicata** per settimana: i dipendenti vedono solo le settimane pubblicate.
 - **Notifiche** in-app, email e push (anche su iPhone con il sito aggiunto alla schermata Home).
-- **Registro modifiche** di chi ha cambiato cosa.
+- **Registro modifiche** di chi ha cambiato cosa, anche per singolo blocco ("Vedi tutte le modifiche").
+- **Calendario personale** per gli operatori (giorno / settimana / mese) con Tempo libero, Scambio turno e Richiesta di modifica.
+- **Google Calendar**: sincronizzazione automatica dei turni pubblicati, nel calendario principale o in uno separato.
+- **Ruoli** Standard, Team Lead, Manager, Amministratore; **team** e **canali** per persona.
 
 Stack: Next.js 14 · Supabase (Postgres, Auth, RLS) · Vercel.
 
@@ -21,7 +24,7 @@ Stack: Next.js 14 · Supabase (Postgres, Auth, RLS) · Vercel.
 
 ### 1. Supabase
 1. Crea un progetto su <https://supabase.com> scegliendo la regione **Central EU (Frankfurt)**.
-2. **SQL Editor** → incolla ed esegui `supabase/migrations/0001_init.sql`, poi `0002_giornate_pause.sql` (in quest'ordine, una volta sola ciascuno).
+2. **SQL Editor** → incolla ed esegui `supabase/migrations/0001_init.sql`, poi `0002_giornate_pause.sql` e `0003_team_calendario.sql` (in quest'ordine, una volta sola ciascuno).
 3. Apri `supabase/setup.sql`, metti il tuo dominio e la tua email, ed eseguilo.
 4. **Project Settings → API**: copia `Project URL`, `anon key` e `service_role key`.
 
@@ -46,7 +49,19 @@ Stack: Next.js 14 · Supabase (Postgres, Auth, RLS) · Vercel.
 - **Email**: account su <https://resend.com>, verifica il dominio, poi `RESEND_API_KEY` e `EMAIL_FROM`.
 - **Push**: `npx web-push generate-vapid-keys` → `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`.
 
-### 5. Primo utilizzo
+### 5. Google Calendar (facoltativo)
+1. Google Cloud → **API e servizi → Libreria** → cerca **Google Calendar API** → **Abilita**.
+2. **Credenziali** → apri il client OAuth già usato per il login → in **URI di reindirizzamento autorizzati** aggiungi
+   `https://<il-tuo-sito>.vercel.app/api/calendar/callback` (lascia anche quello di Supabase).
+3. **Schermata consenso / Accesso ai dati** → aggiungi gli ambiti `.../auth/calendar.events` e `.../auth/calendar.app.created`
+   (con app di tipo Interno non serve la verifica di Google).
+4. Su Vercel aggiungi `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (gli stessi messi in Supabase) e `CRON_SECRET`
+   (una stringa casuale lunga), poi Redeploy.
+
+Ogni persona collega il proprio calendario da **Impostazioni → App collegate**. I turni si aggiornano a ogni modifica
+salvata e comunque una volta al giorno.
+
+### 6. Primo utilizzo
 1. Entra con la tua email (quella in `admin_emails`): diventi amministratore.
 2. **Team** → promuovi gli altri due manager quando si sono registrati.
 3. **Importa Excel** → carica i turni → controlla i collegamenti → importa.

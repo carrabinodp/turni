@@ -1,10 +1,11 @@
 'use client';
 import './timeline.css';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { Activity, ActivityKind, DayMark, DayType, EventRow, Person } from '@/lib/types';
 import { autoBreaks, DEFAULT_RULES, type BreakRule } from '@/lib/breaks';
 import { AbsenceDialog, SwapDialog, type AbsenceInput, type SwapInput } from './ManagerDialogs';
+import { EditEventPopover, InsertEventPopover, type Draft, type HistoryRow } from './EventPopover';
 import {
   addDays, dayStart, diffDays, fmt, fmtDay, fmtTime, localDate, localToUtc, minutesLabel, todayIn, weekStart,
 } from '@/lib/time';
@@ -39,7 +40,7 @@ export interface TimelineProps {
   date: string; // giorno selezionato (YYYY-MM-DD); nel periodo personalizzato è l'inizio
   to?: string; // fine del periodo personalizzato (inclusa)
   tz: string;
-  people: Pick<Person, 'id' | 'full_name' | 'contract' | 'user_id'>[];
+  people: (Pick<Person, 'id' | 'full_name' | 'contract' | 'user_id'> & { team?: string | null; channels?: string[] })[];
   activities: Activity[];
   events: EventRow[];
   dayTypes?: DayType[];
@@ -56,6 +57,7 @@ export interface TimelineProps {
   onCopyWeek?: (src: string, dst: string) => Promise<ActionResult>;
   onTimeOff?: (p: AbsenceInput) => Promise<ActionResult>;
   onSwap?: (p: SwapInput) => Promise<ActionResult>;
+  onHistory?: (eventId: string) => Promise<HistoryRow[]>;
   /** solo anteprima: niente navigazione */
   navigate?: (date: string, view: View, to?: string) => void;
 }
@@ -286,6 +288,16 @@ export default function Timeline(props: TimelineProps) {
   const [menu, setMenu] = useState<{ person: string; x: number; y: number } | null>(null);
   const [dayMenu, setDayMenu] = useState<{ person: string; day: string; t: number; x: number; y: number } | null>(null);
   const [dialog, setDialog] = useState<{ kind: 'absence' | 'swap'; person: string; day: string } | null>(null);
+  const [pop, setPop] = useState<
+    | { mode: 'edit'; id: string; x: number; y: number }
+    | { mode: 'insert'; person: string; draft: Draft; x: number; y: number }
+    | null
+  >(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [team, setTeam] = useState('');
+  const [channel, setChannel] = useState('');
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const lastClick = useRef<{ rect: DOMRect | null; x: number; y: number }>({ rect: null, x: 0, y: 0 });
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ msg: string; bad?: boolean } | null>(null);
   const clipboard = useRef<Ev[]>([]);
@@ -328,7 +340,12 @@ export default function Timeline(props: TimelineProps) {
 
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    let list = people.filter((p) => !q || p.full_name.toLowerCase().includes(q));
+    let list = people.filter(
+      (p) =>
+        (!q || p.full_name.toLowerCase().includes(q)) &&
+        (!team || (p.team ?? '') === team) &&
+        (!channel || (p.channels ?? []).includes(channel)),
+    );
     if (onlyWorking) list = list.filter((p) => byPerson.has(p.id));
     const first = (id: string) => {
       const l = byPerson.get(id);
@@ -342,7 +359,9 @@ export default function Timeline(props: TimelineProps) {
       if (i > 0) list.unshift(list.splice(i, 1)[0]!);
     }
     return list;
-  }, [people, search, onlyWorking, byPerson, sort, canEdit, meId]);
+  }, [people, search, onlyWorking, byPerson, sort, canEdit, meId, team, channel]);
+  const teams = useMemo(() => Array.from(new Set(people.map((p) => p.team).filter(Boolean) as string[])).sort(), [people]);
+  const channels = useMemo(() => Array.from(new Set(people.flatMap((p) => p.channels ?? []))).sort(), [people]);
 
   /* ---- metriche: persone in servizio per fascia ---- */
   const hourPx = 60 * ppm;
@@ -426,6 +445,18 @@ export default function Timeline(props: TimelineProps) {
     return (el?.closest('[data-person]') as HTMLElement | null)?.dataset.person ?? null;
   };
 
+  /** posizione della finestrella vicino al blocco cliccato, dentro l'area visibile */
+  function popPos(rect: DOMRect | null, cx: number, cy: number) {
+    const W = 330, H = Math.min(620, window.innerHeight - 24);
+    const vwid = window.innerWidth;
+    let x: number;
+    if (rect) x = rect.right + 10 + W < vwid - 8 ? rect.right + 10 : rect.left - 10 - W;
+    else x = cx + 14 + W < vwid - 8 ? cx + 14 : cx - 14 - W;
+    x = Math.min(Math.max(8, x), vwid - W - 8);
+    const y = Math.min(Math.max(12, (rect ? rect.top : cy) - 60), window.innerHeight - H - 12);
+    return { x, y };
+  }
+
   /* ---- trascinamento ---- */
   function onPointerDown(e: React.PointerEvent) {
     if (e.button !== 0) return;
@@ -435,9 +466,11 @@ export default function Timeline(props: TimelineProps) {
     if (!canEdit) return;
     const multi = e.shiftKey || e.metaKey || e.ctrlKey;
 
+    lastClick.current = { rect: evEl?.getBoundingClientRect() ?? null, x: e.clientX, y: e.clientY };
     if (evEl) {
       const id = evEl.dataset.ev!;
       if (multi) {
+        setPop(null);
         setSelected((s) => {
           const n = new Set(s);
           if (n.has(id)) n.delete(id);
@@ -509,9 +542,18 @@ export default function Timeline(props: TimelineProps) {
     drag.current = null;
     if (!d) return;
     if (!d.moved) {
-      if (d.mode === 'create') setSelected(new Set());
-      else if (d.mode === 'move') setSelected(new Set([d.clickId]));
       setPreview(null);
+      if (d.mode === 'create') {
+        setSelected(new Set());
+        if (pop) return setPop(null);
+        const s0 = Math.round(d.t0 / (15 * MIN)) * 15 * MIN;
+        const pos = popPos(null, lastClick.current.x, lastClick.current.y);
+        setPop({ mode: 'insert', person: d.person, draft: { s: s0, e: s0 + 30 * MIN, activity_id: brush, note: null }, ...pos });
+      } else if (d.mode === 'move') {
+        setSelected(new Set([d.clickId]));
+        const pos = popPos(lastClick.current.rect, lastClick.current.x, lastClick.current.y);
+        setPop({ mode: 'edit', id: d.clickId, ...pos });
+      }
       return;
     }
     const p = preview;
@@ -523,6 +565,8 @@ export default function Timeline(props: TimelineProps) {
       const created = { ...n, id: uuid() };
       commit([...evsRef.current, created]);
       setSelected(new Set([created.id]));
+      const el = document.querySelector(`[data-ev="${created.id}"]`);
+      void el;
     } else {
       const changed = evsRef.current.map((x) => p.get(x.id) ?? x);
       if (changed.some((x, i) => x !== evsRef.current[i])) commit(changed);
@@ -659,6 +703,7 @@ export default function Timeline(props: TimelineProps) {
         setSelected(new Set());
         setMenu(null);
         setDayMenu(null);
+        setPop(null);
       } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && selected.size) {
         e.preventDefault();
         const d = (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 60 : snapMinutes) * MIN;
@@ -834,7 +879,7 @@ export default function Timeline(props: TimelineProps) {
 
   /* ------------------------------------------------------------------ */
   return (
-    <div className="tl-wrap" onClick={() => { if (menu) setMenu(null); if (dayMenu) setDayMenu(null); }}>
+    <div className="tl-wrap" ref={wrapRef} onClick={() => { if (menu) setMenu(null); if (dayMenu) setDayMenu(null); }}>
       <div className="tl-top">
         <div className="tl-title">
           <h1>Timeline</h1>
@@ -934,6 +979,18 @@ export default function Timeline(props: TimelineProps) {
             <option value="start">Ordina per inizio turno</option>
             <option value="name">Ordina per nome</option>
           </select>
+          {teams.length > 0 && (
+            <select id="tl-team" className="select" value={team} onChange={(e) => setTeam(e.target.value)} aria-label="Team">
+              <option value="">Tutti i team</option>
+              {teams.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          )}
+          {channels.length > 0 && (
+            <select id="tl-channel" className="select" value={channel} onChange={(e) => setChannel(e.target.value)} aria-label="Canale">
+              <option value="">Tutti i canali</option>
+              {channels.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          )}
           <label className="check small">
             <input id="tl-only" type="checkbox" checked={onlyWorking} onChange={(e) => setOnlyWorking(e.target.checked)} /> Solo chi lavora
           </label>
@@ -1041,8 +1098,18 @@ export default function Timeline(props: TimelineProps) {
                 list.filter((e) => actById.get(e.activity_id)?.kind === 'work').map((e) => [Math.max(e.s, startMs), Math.min(e.e, endMs)]),
               );
               return (
-                <div key={p.id} className={`tl-row${p.id === meId ? ' me' : ''}`} style={{ height: ROW_H }}>
+                <Fragment key={p.id}>
+                <div className={`tl-row${p.id === meId ? ' me' : ''}`} style={{ height: ROW_H }}>
                   <div className="tl-name" style={{ width: NAME_W }}>
+                    <button
+                      className="chev"
+                      aria-label={expanded.has(p.id) ? 'Chiudi dettagli' : 'Apri dettagli'}
+                      aria-expanded={expanded.has(p.id)}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={() => setExpanded((s) => { const n = new Set(s); if (n.has(p.id)) n.delete(p.id); else n.add(p.id); return n; })}
+                    >
+                      ›
+                    </button>
                     <span className="nm" title={p.full_name}>
                       {p.full_name}
                       {p.contract && <small>({p.contract})</small>}
@@ -1098,6 +1165,7 @@ export default function Timeline(props: TimelineProps) {
                           title={label}
                         >
                           {canEdit && width >= 24 && <span className="h l" data-h="l" />}
+                          {ev.note && width > 18 && <span className="note-ic" aria-label="Con descrizione">≡</span>}
                           {width > (view !== 'day' && a?.kind !== 'absence' ? 140 : 44) && <span className="lbl">{a?.name}</span>}
                           {canEdit && width >= 24 && <span className="h r" data-h="r" />}
                         </div>
@@ -1105,6 +1173,27 @@ export default function Timeline(props: TimelineProps) {
                     })}
                   </div>
                 </div>
+                {expanded.has(p.id) && (
+                  <div className="tl-detail" style={{ width: NAME_W + trackW }}>
+                    <div className="tl-detail-in" style={{ width: Math.min(vw, NAME_W + trackW) }}>
+                      <span><b>Team</b> {p.team ?? '—'}</span>
+                      <span><b>Canali</b> {(p.channels ?? []).join(', ') || '—'}</span>
+                      <span><b>Contratto</b> {p.contract ?? '—'}</span>
+                      {(() => {
+                        const per = new Map<string, number>();
+                        list.forEach((e) => {
+                          const a = actById.get(e.activity_id);
+                          if (!a) return;
+                          per.set(a.name, (per.get(a.name) ?? 0) + (Math.min(e.e, endMs) - Math.max(e.s, startMs)) / MIN);
+                        });
+                        return Array.from(per.entries()).map(([n, m]) => (
+                          <span key={n}><b>{n}</b> {minutesLabel(m)}</span>
+                        ));
+                      })()}
+                    </div>
+                  </div>
+                )}
+                </Fragment>
               );
             })}
             {now !== null && now > startMs && now < endMs && (!compact || (minuteOfDay(now, tz) >= win.h0 * 60 && minuteOfDay(now, tz) < win.h1 * 60)) && <div className="tl-now" style={{ left: NAME_W + x(now) }} />}
@@ -1186,7 +1275,58 @@ export default function Timeline(props: TimelineProps) {
         />
       )}
 
-      {canEdit && selEvents.length > 0 && !preview && (
+      {canEdit && pop?.mode === 'edit' && !preview && (() => {
+        const ev = evsRef.current.find((x) => x.id === pop.id);
+        if (!ev) return null;
+        const orig = props.events.find((r) => r.id === ev.id);
+        const byName = orig?.updated_by ? people.find((x) => x.id === orig.updated_by)?.full_name ?? null : null;
+        return (
+          <EditEventPopover
+            x={pop.x}
+            y={pop.y}
+            tz={tz}
+            activities={usable}
+            draft={{ s: ev.s, e: ev.e, activity_id: ev.activity_id, note: ev.note }}
+            personName={people.find((x) => x.id === ev.person_id)?.full_name ?? ''}
+            lastModified={orig ? { at: orig.updated_at, by: byName } : null}
+            loadHistory={props.onHistory && orig ? () => props.onHistory!(ev.id) : undefined}
+            onClose={() => setPop(null)}
+            onUpdate={(d) => {
+              commit(evsRef.current.map((x) => (x.id === ev.id ? { ...x, ...d } : x)));
+              setPop(null);
+              say('Evento aggiornato. Ricorda di salvare le modifiche.');
+            }}
+            onInsertAfter={(d) =>
+              setPop({ mode: 'insert', person: ev.person_id, draft: { s: d.e, e: d.e + 30 * MIN, activity_id: brush || d.activity_id, note: null }, x: pop.x, y: pop.y })
+            }
+            onDelete={() => {
+              removeIds(new Set([ev.id]));
+              setPop(null);
+            }}
+          />
+        );
+      })()}
+      {canEdit && pop?.mode === 'insert' && (
+        <InsertEventPopover
+          x={pop.x}
+          y={pop.y}
+          tz={tz}
+          activities={usable}
+          draft={pop.draft}
+          personId={pop.person}
+          people={people}
+          onClose={() => setPop(null)}
+          onInsert={(d, ids) => {
+            const created = ids.map((pid) => ({ id: uuid(), person_id: pid, activity_id: d.activity_id, s: d.s, e: d.e, note: d.note, version: null }));
+            commit([...evsRef.current, ...created]);
+            setSelected(new Set(created.map((c) => c.id)));
+            setPop(null);
+            say(created.length > 1 ? `Evento inserito per ${created.length} persone. Ricorda di salvare.` : 'Evento inserito. Ricorda di salvare.');
+          }}
+        />
+      )}
+
+      {canEdit && selEvents.length > 1 && !preview && !pop && (
         <Inspector
           events={selEvents}
           people={people}

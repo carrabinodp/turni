@@ -2,34 +2,51 @@ import { getSession } from '@/lib/session';
 import { groupShifts, shiftText } from '@/lib/shifts';
 import { addDays, dayStart, isValidDate, todayIn, weekStart } from '@/lib/time';
 import type { Activity, EventRow, RequestRow } from '@/lib/types';
-import MyShifts, { type DayCard, type Colleague } from './MyShifts';
+import MyCalendar, { type CalEvent } from './MyCalendar';
+import type { Colleague } from './MyShifts';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
-export default async function MyShiftsPage({ searchParams }: { searchParams: { w?: string } }) {
+export default async function MyCalendarPage({ searchParams }: { searchParams: { d?: string; v?: string; w?: string } }) {
   const { supabase, me, tz } = await getSession();
   const today = todayIn(tz);
-  const week = weekStart(isValidDate(searchParams.w) ? searchParams.w : today);
-  const horizon = addDays(today, 35);
-  const from = week < today ? week : today;
-  const to = addDays(week, 7) > horizon ? addDays(week, 7) : horizon;
+  const view = searchParams.v === 'day' ? 'day' : searchParams.v === 'month' ? 'month' : 'week';
+  const date = isValidDate(searchParams.d) ? searchParams.d : isValidDate(searchParams.w) ? searchParams.w : today;
 
-  const [{ data: ev }, { data: acts }, { data: people }, { data: reqs }, { data: pub }, { data: dts }, { data: mks }] = await Promise.all([
+  let from: string, to: string;
+  if (view === 'day') {
+    from = date;
+    to = addDays(date, 1);
+  } else if (view === 'week') {
+    from = weekStart(date);
+    to = addDays(from, 7);
+  } else {
+    const first = date.slice(0, 8) + '01';
+    from = weekStart(first);
+    const nextMonth = addDays(first, 32).slice(0, 8) + '01';
+    to = addDays(weekStart(addDays(nextMonth, -1)), 7);
+  }
+  // per gli scambi servono anche i turni dei colleghi nelle prossime settimane
+  const horizon = addDays(today, 42);
+  const qFrom = from < today ? from : today;
+  const qTo = to > horizon ? to : horizon;
+
+  const [{ data: ev }, { data: acts }, { data: people }, { data: reqs }, { data: pub }, { data: dts }, { data: mks }, { data: cal }] = await Promise.all([
     supabase
       .from('events')
       .select('id, person_id, activity_id, starts_at, ends_at, note, source, updated_at')
-      .gte('starts_at', new Date(dayStart(from, tz)).toISOString())
-      .lt('starts_at', new Date(dayStart(to, tz)).toISOString())
-      .limit(10000),
+      .gte('starts_at', new Date(dayStart(qFrom, tz)).toISOString())
+      .lt('starts_at', new Date(dayStart(qTo, tz)).toISOString())
+      .limit(20000),
     supabase.from('activity_types').select('*').order('sort_order'),
     supabase.from('people').select('id, full_name, user_id').eq('active', true).order('full_name'),
     supabase.from('requests').select('*').in('status', ['pending_peer', 'open', 'pending_manager']),
-    supabase.from('schedule_weeks').select('week_start').gte('week_start', addDays(weekStart(from), 0)).lte('week_start', to),
+    supabase.from('schedule_weeks').select('week_start').gte('week_start', weekStart(qFrom)).lt('week_start', qTo),
     supabase.from('day_types').select('id, name, color'),
-    supabase.from('day_marks').select('day, day_type_id').eq('person_id', me.id).gte('day', week).lt('day', addDays(week, 7)),
+    supabase.from('day_marks').select('day, day_type_id').eq('person_id', me.id).gte('day', from).lt('day', to),
+    supabase.rpc('my_calendar_status'),
   ]);
-  const dtById = new Map((dts ?? []).map((d) => [d.id as string, { name: d.name as string, color: d.color as string }]));
-  const markByDay = new Map((mks ?? []).map((m) => [m.day as string, dtById.get(m.day_type_id as string) ?? null]));
 
   const activities = (acts ?? []) as Activity[];
   const events = (ev ?? []) as EventRow[];
@@ -37,21 +54,28 @@ export default async function MyShiftsPage({ searchParams }: { searchParams: { w
   const published = new Set((pub ?? []).map((w) => w.week_start as string));
   const open = (reqs ?? []) as RequestRow[];
   const busyDay = (pid: string, d: string) =>
-    open.some((r) => r.kind !== 'time_off' && ((r.requester_id === pid && r.day_a === d) || (r.target_id === pid && r.day_b === d)));
+    open.some((r) => r.kind !== 'time_off' && r.kind !== 'change' && ((r.requester_id === pid && r.day_a === d) || (r.target_id === pid && r.day_b === d)));
 
-  const days: DayCard[] = Array.from({ length: 7 }, (_, i) => {
-    const d = addDays(week, i);
-    const sh = shifts.get(`${me.id}|${d}`);
-    return {
-      day: d,
-      text: sh ? shiftText(sh, tz) : null,
-      absence: sh?.absence ?? null,
-      blocks: (sh?.blocks ?? []).map((b) => ({ ...b, color: activities.find((a) => a.id === b.activity_id)?.color ?? '#999', name: activities.find((a) => a.id === b.activity_id)?.name ?? '' })),
-      hasShift: !!sh && Number.isFinite(sh.start),
-      dayType: markByDay.get(d) ?? null,
-      pending: busyDay(me.id, d),
-      canAct: d >= today && published.has(weekStart(d)),
-    };
+  const fromMs = dayStart(from, tz);
+  const toMs = dayStart(to, tz);
+  const mine: CalEvent[] = events
+    .filter((e) => e.person_id === me.id && Date.parse(e.ends_at) > fromMs && Date.parse(e.starts_at) < toMs)
+    .map((e) => {
+      const a = activities.find((x) => x.id === e.activity_id);
+      return { id: e.id, s: Date.parse(e.starts_at), e: Date.parse(e.ends_at), name: a?.name ?? '', color: a?.color ?? '#999999', kind: a?.kind ?? 'work', note: e.note };
+    });
+
+  const dtById = new Map((dts ?? []).map((d) => [d.id as string, { name: d.name as string, color: d.color as string }]));
+  const marks: Record<string, { name: string; color: string }> = {};
+  (mks ?? []).forEach((m) => {
+    const d = dtById.get(m.day_type_id as string);
+    if (d) marks[m.day as string] = d;
+  });
+
+  const myDays: Record<string, { text: string; canAct: boolean; pending: boolean }> = {};
+  shifts.forEach((sh) => {
+    if (sh.person_id !== me.id || !Number.isFinite(sh.start)) return;
+    myDays[sh.day] = { text: shiftText(sh, tz), canAct: sh.day >= today && published.has(weekStart(sh.day)), pending: busyDay(me.id, sh.day) };
   });
 
   const colleagues: Colleague[] = (people ?? [])
@@ -66,20 +90,26 @@ export default async function MyShiftsPage({ searchParams }: { searchParams: { w
       busyDays: Array.from(shifts.values()).filter((s) => s.person_id === p.id).map((s) => s.day),
     }));
 
-  const totalMin = days.reduce(
-    (sum, d) => sum + d.blocks.filter((b) => activities.find((a) => a.id === b.activity_id)?.kind === 'work').reduce((x, b) => x + (b.e - b.s) / 60000, 0),
-    0,
-  );
+  const weeks: string[] = [];
+  for (let w = weekStart(from); w < to; w = addDays(w, 7)) weeks.push(w);
+  const calStatus = Array.isArray(cal) ? cal[0] ?? null : null;
 
   return (
-    <MyShifts
-      week={week}
+    <MyCalendar
+      me={{ name: me.full_name, email: me.email, channels: me.channels ?? [], team: me.team, contract: me.contract, role: me.role }}
+      view={view}
+      date={date}
+      from={from}
+      to={to}
       today={today}
       tz={tz}
-      days={days}
-      weekPublished={published.has(week)}
+      events={mine}
+      marks={marks}
+      days={myDays}
+      unpublishedWeeks={weeks.filter((w) => !published.has(w))}
       colleagues={colleagues}
-      totalMinutes={totalMin}
+      absences={activities.filter((a) => a.kind === 'absence' && a.requestable && !a.archived)}
+      calendarConnected={!!calStatus}
     />
   );
 }

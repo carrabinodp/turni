@@ -10,18 +10,39 @@ const done = (message: string): R => {
   return { ok: true, message };
 };
 
-export async function addPerson(fullName: string, email: string, contract: string): Promise<R> {
+export async function addPerson(fullName: string, email: string, contract: string, team = '', channels: string[] = []): Promise<R> {
   const { supabase } = await requireManager();
   const name = fullName.trim();
   if (!name) return { ok: false, error: 'Inserisci nome e cognome' };
   const em = email.trim().toLowerCase() || null;
   if (em && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) return { ok: false, error: 'Email non valida' };
-  const { error } = await supabase.from('people').insert({ full_name: name, email: em, contract: contract.trim() || null });
+  const { error } = await supabase.from('people').insert({ full_name: name, email: em, contract: contract.trim() || null, team: team.trim() || null, channels });
   if (error) return { ok: false, error: error.code === '23505' ? 'Questa email è già nel team' : error.message };
   return done(`${name} aggiunto. Al primo accesso con Google verrà collegato automaticamente.`);
 }
 
-export async function updatePerson(id: string, patch: { full_name?: string; contract?: string | null; active?: boolean; role?: Role }): Promise<R> {
+type Patch = { full_name?: string; contract?: string | null; active?: boolean; role?: Role; team?: string | null; channels?: string[] };
+
+export async function bulkUpdate(ids: string[], patch: Patch | { addChannel: string } | { removeChannel: string }): Promise<R> {
+  const { supabase, me } = await requireManager();
+  if (!ids.length) return { ok: false, error: 'Nessuna persona selezionata' };
+  if ('active' in patch && patch.active === false && ids.includes(me.id)) return { ok: false, error: 'Non puoi disattivare te stesso' };
+  if ('addChannel' in patch || 'removeChannel' in patch) {
+    const { data } = await supabase.from('people').select('id, channels').in('id', ids);
+    for (const p of data ?? []) {
+      const cur: string[] = p.channels ?? [];
+      const next = 'addChannel' in patch ? Array.from(new Set([...cur, patch.addChannel])) : cur.filter((c) => c !== patch.removeChannel);
+      const { error } = await supabase.from('people').update({ channels: next }).eq('id', p.id);
+      if (error) return { ok: false, error: error.message };
+    }
+  } else {
+    const { error } = await supabase.from('people').update(patch).in('id', ids);
+    if (error) return { ok: false, error: error.message };
+  }
+  return done(`Aggiornate ${ids.length} persone`);
+}
+
+export async function updatePerson(id: string, patch: Patch): Promise<R> {
   const { supabase, me } = await requireManager();
   if (id === me.id && (patch.active === false || (patch.role && patch.role !== me.role))) {
     return { ok: false, error: 'Non puoi disattivare o cambiare il ruolo del tuo stesso profilo' };

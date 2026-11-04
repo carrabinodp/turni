@@ -7,6 +7,7 @@ import type { PersonLite } from '@/lib/import/match';
 import { importAction } from './actions';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 export default async function ImportPage() {
   const { supabase, tz, settings } = await requireManager();

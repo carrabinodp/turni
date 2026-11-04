@@ -1,6 +1,6 @@
-export type Role = 'agent' | 'manager' | 'admin';
+export type Role = 'agent' | 'team_lead' | 'manager' | 'admin';
 export type ActivityKind = 'work' | 'break' | 'absence';
-export type RequestKind = 'swap' | 'give' | 'time_off';
+export type RequestKind = 'swap' | 'give' | 'time_off' | 'change';
 export type RequestStatus =
   | 'pending_peer'
   | 'open'
@@ -31,6 +31,9 @@ export interface Person {
   role: Role;
   active: boolean;
   contract: string | null;
+  team: string | null;
+  channels: string[];
+  notify_requests: boolean;
   email_notifications: boolean;
   created_at: string;
 }
@@ -70,6 +73,7 @@ export interface EventRow {
   note: string | null;
   source: string;
   updated_at: string;
+  updated_by?: string | null;
 }
 
 export interface RequestRow {
@@ -93,9 +97,19 @@ export interface RequestRow {
 }
 
 export const ROLE_LABEL: Record<Role, string> = {
-  agent: 'Dipendente',
+  agent: 'Standard',
+  team_lead: 'Team Lead',
   manager: 'Manager',
   admin: 'Amministratore',
+};
+
+export const isManagerRole = (r: Role) => r !== 'agent';
+
+export const KIND_REQ_LABEL: Record<RequestKind, string> = {
+  swap: 'Scambio turno',
+  give: 'Cessione turno',
+  time_off: 'Assenza',
+  change: 'Richiesta di modifica',
 };
 
 export const KIND_LABEL: Record<ActivityKind, string> = {

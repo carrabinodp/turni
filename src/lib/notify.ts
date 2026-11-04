@@ -99,7 +99,12 @@ export async function notify(personIds: (string | null | undefined)[], n: Notice
 export async function managerIds(): Promise<string[]> {
   const admin = createAdminClient();
   if (!admin) return [];
-  const { data } = await admin.from('people').select('id').in('role', ['manager', 'admin']).eq('active', true);
+  const { data } = await admin
+    .from('people')
+    .select('id')
+    .in('role', ['manager', 'admin', 'team_lead'])
+    .eq('active', true)
+    .eq('notify_requests', true);
   return (data ?? []).map((p) => p.id);
 }
 

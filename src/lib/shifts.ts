@@ -62,6 +62,10 @@ export function describeRequest(
       ? `${n(r.requester_id)} cede ${fmtDay(r.day_a!, 'EEE d MMM')} (${shiftText(a, tz)}) a ${n(r.target_id)}`
       : `${n(r.requester_id)} cede ${fmtDay(r.day_a!, 'EEE d MMM')} (${shiftText(a, tz)})`;
   }
+  if (r.kind === 'change') {
+    const sh = shifts.get(`${r.requester_id}|${r.day_a}`);
+    return `${n(r.requester_id)}, ${fmtDay(r.day_a!, 'EEE d MMM')}${sh ? ` (turno ${shiftText(sh, tz)})` : ''}: ${r.note ?? ''}`;
+  }
   const act = r.activity_id ? acts.get(r.activity_id)?.name ?? 'Assenza' : 'Assenza';
   const days = r.from_date === r.to_date ? fmtDay(r.from_date!, 'EEE d MMM') : `dal ${fmtDay(r.from_date!, 'd MMM')} al ${fmtDay(r.to_date!, 'd MMM')}`;
   const hours = r.time_from ? `, ${r.time_from.slice(0, 5)}–${r.time_to?.slice(0, 5)}` : '';

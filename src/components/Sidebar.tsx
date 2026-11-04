@@ -53,15 +53,16 @@ export default function Sidebar({ me, orgName, isManager, counts }: Props) {
         </div>
         <nav className="nav">
           {link('/timeline', 'Timeline', IcTimeline)}
-          {link('/i-miei-turni', 'I miei turni', IcMe)}
+          {link('/i-miei-turni', 'Il mio calendario', IcMe)}
           {link('/richieste', 'Richieste', IcSwap, counts.requests)}
-          {link('/assenze', 'Ferie e permessi', IcOff)}
+          {link('/assenze', 'Tempo libero', IcOff)}
           {link('/notifiche', 'Notifiche', IcBell, counts.notifications)}
+          {link('/impostazioni', 'Impostazioni', IcGear)}
           {isManager && (
             <div className="nav-group nav">
               <span className="label">Gestione</span>
               {link('/import', 'Importa Excel', IcImport)}
-              {link('/team', 'Team', IcTeam)}
+              {link('/team', 'Persone', IcTeam)}
               {link('/registro', 'Registro modifiche', IcLog)}
               {link('/configura', 'Configura', IcGear)}
             </div>
