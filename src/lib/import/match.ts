@@ -4,7 +4,7 @@ import type { Activity, Person } from '@/lib/types';
 
 export type PersonLite = Pick<Person, 'id' | 'full_name' | 'email' | 'aliases' | 'user_id'>;
 
-export type MatchStatus = 'email' | 'name' | 'alias' | 'fuzzy' | 'none';
+export type MatchStatus = 'email' | 'name' | 'alias' | 'surname' | 'fuzzy' | 'none';
 
 export interface PersonMatch {
   status: MatchStatus;
@@ -47,10 +47,21 @@ export function matchPerson(name: string, email: string | null, people: PersonLi
   const byAlias = people.filter((x) => x.aliases.some((a) => normName(a) === n));
   if (byAlias.length === 1) return { status: 'alias', person: byAlias[0]!, candidates: [] };
 
+  // solo cognome (o parte del nome): "Borra" → "Claudia Borra", se è l'unico
+  const tokens = n.split(' ').filter(Boolean);
+  const bySubset = people.filter((x) => {
+    const pt = normName(x.full_name).split(' ');
+    return tokens.length > 0 && tokens.length < pt.length && tokens.every((t) => pt.includes(t));
+  });
+  if (bySubset.length === 1) return { status: 'surname', person: bySubset[0]!, candidates: [] };
+  if (bySubset.length > 1) return { status: 'fuzzy', person: null, candidates: bySubset };
+
   const fuzzy = people.filter((x) => {
     if (initialsCompatible(name, x.full_name)) return true;
     const m = normName(x.full_name);
-    return n.length >= 6 && levenshtein(n, m) <= (n.length > 12 ? 2 : 1);
+    if (n.length >= 6 && levenshtein(n, m) <= (n.length > 12 ? 2 : 1)) return true;
+    // cognome scritto male: "Bennincaso" ↔ "Mario Benincaso"
+    return tokens.length === 1 && n.length >= 6 && m.split(' ').some((t) => t.length >= 5 && levenshtein(n, t) <= 1);
   });
   if (fuzzy.length === 1) return { status: 'fuzzy', person: fuzzy[0]!, candidates: fuzzy };
   return { status: fuzzy.length ? 'fuzzy' : 'none', person: null, candidates: fuzzy };

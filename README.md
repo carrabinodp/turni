@@ -3,7 +3,7 @@
 Sito interno per pianificare turni e attività del team, in stile "staffing timeline".
 
 - **Timeline** giorno/settimana: blocchi colorati per attività, trascina per spostare, tira i bordi per allungare/accorciare, disegna nuovi blocchi, copia/incolla, annulla, salva in blocco.
-- **Import Excel**: griglia persone × giorni o elenco di blocchi (anche export di Assembled). Riconosce orari, attività e collega ogni riga alla persona per email o nome e cognome.
+- **Import Excel**: griglia giorni × persone (come il file turni attuale, un foglio per mese), griglia persone × giorni o elenco di blocchi (anche export di Assembled). Riconosce orari, colori delle celle con la legenda del file (Ferie, Rec, Reclami, Smart…), ignora righe di totali e colonne di statistiche, e collega ogni colonna alla persona anche col solo cognome.
 - **Login con Google aziendale**: chi entra con l'email del dominio ottiene il profilo in automatico; se era già nel file importato, viene collegato ai suoi turni.
 - **Scambi, cessioni in bacheca, ferie e permessi** con approvazione di un manager (basta uno dei tre).
 - **Controllo del riposo minimo** (11 h, configurabile) sul server: uno scambio che lo viola non passa.

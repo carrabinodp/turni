@@ -4,9 +4,10 @@ import Link from 'next/link';
 import type { Activity, ActivityKind } from '@/lib/types';
 import { KIND_LABEL } from '@/lib/types';
 import {
-  columnLabels, detect, detectGrid, detectList, parse, plain,
-  type GridMapping, type ListMapping, type Mapping, type ParsedItem, type Rows,
+  columnLabels, serialToDate, detect, detectGrid, detectGridCols, detectLegend, detectList, parse, plain,
+  type GridColsMapping, type GridMapping, type ListMapping, type Mapping, type ParsedItem, type Rows,
 } from '@/lib/import/parse';
+import { readSheets, type SheetData } from '@/lib/import/workbook';
 import { matchActivity, matchPerson, type PersonLite } from '@/lib/import/match';
 import { addDays, fmtDay, fmtTime, localDate, todayIn, weekStart } from '@/lib/time';
 
@@ -28,10 +29,14 @@ export type ImportResult =
   | { ok: false; error: string };
 
 const NEW_COLORS = ['#2e6e9e', '#7b5ea7', '#3a8a6e', '#b5642a', '#a33a5a', '#5d7686', '#8a7a2e'];
-const STATUS_TXT = { email: 'Email', name: 'Nome', alias: 'Già collegato', fuzzy: 'Da confermare', none: 'Nuova' } as const;
+const STATUS_TXT = { email: 'Email', name: 'Nome', alias: 'Già collegato', surname: 'Cognome', fuzzy: 'Da confermare', none: 'Nuova' } as const;
+const ABSENCE_WORDS = /ferie|malattia|maternit|permess|congedo|assenza|infortunio|l\.?104|rol\b/;
+const SKIP_WORDS = /^(riposo|dimess|licenziat|cessat)/;
+const IGNORE_WORDS = /^(lavorativ|normale|da verificare|verificare|confermare)/;
 
 type PersonChoice = { kind: 'existing'; id: string } | { kind: 'new' } | { kind: 'skip' };
 type ActChoice = { kind: 'existing'; id: string } | { kind: 'new'; actKind: ActivityKind } | { kind: 'skip' };
+type ColorChoice = { kind: 'existing'; id: string } | { kind: 'new'; name: string; actKind: ActivityKind } | { kind: 'ignore' } | { kind: 'skip' };
 
 export default function Importer(props: {
   people: PersonLite[];
@@ -42,13 +47,14 @@ export default function Importer(props: {
   const { tz } = props;
   const today = todayIn(tz);
   const [fileName, setFileName] = useState('');
-  const [sheets, setSheets] = useState<{ name: string; rows: Rows }[]>([]);
+  const [sheets, setSheets] = useState<SheetData[]>([]);
   const [sheetIdx, setSheetIdx] = useState(0);
   const [year, setYear] = useState(Number(today.slice(0, 4)));
   const [wkStart, setWkStart] = useState(addDays(weekStart(today), 7));
   const [mapping, setMapping] = useState<Mapping | null>(null);
   const [personChoice, setPersonChoice] = useState<Record<string, PersonChoice>>({});
   const [actChoice, setActChoice] = useState<Record<string, ActChoice>>({});
+  const [colorChoice, setColorChoice] = useState<Record<string, ColorChoice>>({});
   const [defaultAct, setDefaultAct] = useState(props.activities.find((a) => a.kind === 'work' && !a.archived)?.id ?? '');
   const [replace, setReplace] = useState(true);
   const [publish, setPublish] = useState(false);
@@ -58,6 +64,8 @@ export default function Importer(props: {
   const [drag, setDrag] = useState(false);
 
   const rows = sheets[sheetIdx]?.rows ?? [];
+  const fills = sheets[sheetIdx]?.fills;
+  const legend = useMemo(() => detectLegend(sheets), [sheets]);
   const opts = useMemo(() => ({ tz, year, weekStart: wkStart }), [tz, year, wkStart]);
 
   async function readFile(f: File) {
@@ -67,14 +75,25 @@ export default function Importer(props: {
     try {
       const XLSX = await import('xlsx');
       const buf = await f.arrayBuffer();
-      const wb = XLSX.read(buf, { type: 'array', cellDates: false });
-      const list = wb.SheetNames.map((name) => ({
-        name,
-        rows: XLSX.utils.sheet_to_json(wb.Sheets[name]!, { header: 1, raw: true, defval: null, blankrows: true }) as Rows,
-      })).filter((s) => s.rows.length > 0);
+      const wb = XLSX.read(buf, { type: 'array', cellDates: false, cellStyles: true });
+      const list = readSheets(XLSX, wb);
       if (!list.length) throw new Error('Il file è vuoto');
-      // foglio con il formato riconoscibile, altrimenti il primo
-      const best = Math.max(0, list.findIndex((s) => detect(s.rows, opts)));
+      // foglio più vicino a oggi tra quelli riconosciuti (es. il mese corrente)
+      let best = 0;
+      let bestScore = Infinity;
+      list.forEach((sh, i) => {
+        const m = detect(sh.rows, opts);
+        if (!m) return;
+        const items = parse(sh.rows, m, opts).items;
+        if (!items.length) return;
+        const ds = items.map((it) => localDate(it.s, tz)).sort();
+        const from = ds[0]!, to = ds[ds.length - 1]!;
+        const score = today >= from && today <= to ? 0 : Math.abs(Date.parse(today < from ? from : to) - Date.parse(today)) + (today > to ? 1 : 0);
+        if (score < bestScore || (score === bestScore && i > best)) {
+          bestScore = score;
+          best = i;
+        }
+      });
       setSheets(list);
       selectSheet(list, best);
     } catch (e) {
@@ -88,10 +107,41 @@ export default function Importer(props: {
     setMapping(detect(list[i]!.rows, opts));
     setPersonChoice({});
     setActChoice({});
+    setColorChoice({});
   }
 
   /* ---- interpretazione ---- */
-  const parsed = useMemo(() => (mapping ? parse(rows, mapping, opts) : null), [rows, mapping, opts]);
+  const parsed = useMemo(() => (mapping ? parse(rows, mapping, opts, fills) : null), [rows, mapping, opts, fills]);
+
+  /* ---- colori delle celle → attività ---- */
+  const colors = useMemo(() => {
+    if (!parsed) return [];
+    const m = new Map<string, { fill: string; count: number; sample: string }>();
+    for (const it of parsed.items) {
+      if (!it.fill) continue;
+      const cur = m.get(it.fill) ?? { fill: it.fill, count: 0, sample: `${it.name} ${fmtDay(localDate(it.s, tz), 'd MMM')}` };
+      cur.count++;
+      m.set(it.fill, cur);
+    }
+    return Array.from(m.values()).sort((a, b) => b.count - a.count).map((c) => ({ ...c, legend: legend.get(c.fill) ?? null }));
+  }, [parsed, legend, tz]);
+
+  const colorOf = (c: (typeof colors)[number]): ColorChoice => {
+    if (colorChoice[c.fill]) return colorChoice[c.fill]!;
+    if (!c.legend) return { kind: 'ignore' };
+    const l = plain(c.legend);
+    if (SKIP_WORDS.test(l)) return { kind: 'skip' };
+    if (IGNORE_WORDS.test(l)) return { kind: 'ignore' };
+    const a = matchActivity(c.legend, props.activities);
+    if (a) return { kind: 'existing', id: a.id };
+    return { kind: 'new', name: c.legend.charAt(0).toUpperCase() + c.legend.slice(1), actKind: ABSENCE_WORDS.test(l) ? 'absence' : 'work' };
+  };
+  const colorMap = new Map(colors.map((c) => [c.fill, colorOf(c)]));
+  /** il colore decide l'attività del blocco? */
+  const byColor = (it: ParsedItem) => {
+    const c = it.fill ? colorMap.get(it.fill) : undefined;
+    return c && c.kind !== 'ignore' ? c : null;
+  };
 
   const persons = useMemo(() => {
     if (!parsed) return [];
@@ -108,6 +158,7 @@ export default function Importer(props: {
     if (!parsed) return [];
     const m = new Map<string, { label: string; count: number; allDay: number }>();
     for (const it of parsed.items) {
+      if (byColor(it)) continue;
       const k = it.activity ? plain(it.activity) : '';
       const cur = m.get(k) ?? { label: it.activity ?? '', count: 0, allDay: 0 };
       cur.count++;
@@ -117,8 +168,9 @@ export default function Importer(props: {
     return Array.from(m.entries())
       .filter(([k]) => k)
       .map(([k, v]) => ({ key: k, ...v, match: matchActivity(v.label, props.activities) }));
-  }, [parsed, props.activities]);
-  const unlabeled = parsed?.items.filter((i) => !i.activity).length ?? 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parsed, props.activities, colorChoice, colors]);
+  const unlabeled = parsed?.items.filter((i) => !i.activity && !byColor(i)).length ?? 0;
 
   const personOf = (p: (typeof persons)[number]): PersonChoice =>
     personChoice[p.key] ?? (p.match.person ? { kind: 'existing', id: p.match.person.id } : { kind: 'new' });
@@ -170,13 +222,29 @@ export default function Importer(props: {
         }
       }
     });
+    const cMap = new Map<string, { activity_id?: string; activity_key?: string } | null>();
+    colors.forEach((c, i) => {
+      const ch = colorOf(c);
+      if (ch.kind === 'skip') cMap.set(c.fill, null);
+      else if (ch.kind === 'existing') cMap.set(c.fill, { activity_id: ch.id });
+      else if (ch.kind === 'new') {
+        const key = `c:${c.fill}`;
+        const existing = pay.activity_create.find((x) => plain(x.name) === plain(ch.name));
+        if (existing) cMap.set(c.fill, { activity_key: existing.key });
+        else {
+          pay.activity_create.push({ key, name: ch.name, kind: ch.actKind, color: `#${c.fill.toLowerCase()}` });
+          cMap.set(c.fill, { activity_key: key });
+        }
+        void i;
+      }
+    });
     if (!defaultAct && unlabeled) {
       setBusy(false);
       return setError('Scegli l’attività per i turni senza etichetta');
     }
     for (const it of parsed.items) {
       const p = pMap.get(it.key);
-      const a = it.activity ? aMap.get(plain(it.activity)) : { activity_id: defaultAct };
+      const a = it.fill && cMap.has(it.fill) ? cMap.get(it.fill) : it.activity ? aMap.get(plain(it.activity)) : { activity_id: defaultAct };
       if (!p || !a) continue;
       pay.rows.push({ ...p, ...a, starts_at: new Date(it.s).toISOString(), ends_at: new Date(it.e).toISOString(), note: it.note });
     }
@@ -331,6 +399,51 @@ export default function Importer(props: {
                 </div>
               )}
 
+              {colors.length > 0 && (
+                <div className="table-wrap">
+                  <table className="table">
+                    <thead><tr><th>Colore nel file</th><th>Legenda</th><th>Celle</th><th>Diventa</th></tr></thead>
+                    <tbody>
+                      {colors.map((c) => {
+                        const ch = colorOf(c);
+                        const val = ch.kind === 'existing' ? ch.id : ch.kind === 'new' ? `new:${ch.actKind}` : ch.kind;
+                        const newName = ch.kind === 'new' ? ch.name : c.legend ?? `Colore ${c.fill}`;
+                        return (
+                          <tr key={c.fill}>
+                            <td><span className="swatch" style={{ background: `#${c.fill}`, width: 26, height: 18, verticalAlign: 'middle' }} /> <span className="small muted">es. {c.sample}</span></td>
+                            <td>{c.legend ?? <span className="muted small">non in legenda</span>}</td>
+                            <td className="tabnum">{c.count}</td>
+                            <td>
+                              <select
+                                id={`imp-c-${c.fill}`}
+                                className="select"
+                                value={val}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  setColorChoice((s) => ({
+                                    ...s,
+                                    [c.fill]: v === 'ignore' || v === 'skip' ? { kind: v } : v.startsWith('new:') ? { kind: 'new', name: newName, actKind: v.slice(4) as ActivityKind } : { kind: 'existing', id: v },
+                                  }));
+                                }}
+                              >
+                                <option value="ignore">Nessun significato (usa l’orario normale)</option>
+                                <option value="skip">Non importare queste celle</option>
+                                {(['work', 'absence'] as ActivityKind[]).map((k) => (
+                                  <option key={k} value={`new:${k}`}>+ Nuova attività “{newName}” ({KIND_LABEL[k].toLowerCase()})</option>
+                                ))}
+                                <optgroup label="Attività esistenti">
+                                  {props.activities.filter((a) => !a.archived).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                                </optgroup>
+                              </select>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
               {(labels.length > 0 || unlabeled > 0) && (
                 <div className="table-wrap">
                   <table className="table">
@@ -449,22 +562,27 @@ function MappingCard(props: {
   const setGrid = (patch: Partial<GridMapping>) => mapping?.format === 'grid' && setMapping({ ...mapping, ...patch });
   const num = (v: string) => (v === '' ? null : Number(v));
 
-  function switchFormat(f: 'grid' | 'list') {
-    const m = f === 'grid' ? detectGrid(rows, props.opts) : detectList(rows);
+  function switchFormat(f: 'grid' | 'list' | 'gridCols') {
+    const m = f === 'grid' ? detectGrid(rows, props.opts) : f === 'gridCols' ? detectGridCols(rows, props.opts) : detectList(rows);
     if (m) return setMapping(m);
     setMapping(
       f === 'grid'
         ? { format: 'grid', headerRow, nameCols: [0], emailCol: null, dateCols: [] }
-        : { format: 'list', headerRow, name: [0], email: null, date: null, start: null, end: null, shift: null, activity: null, note: null },
+        : f === 'gridCols'
+          ? { format: 'gridCols', headerRow, dateCol: 0, personCols: [] }
+          : { format: 'list', headerRow, name: [0], email: null, date: null, start: null, end: null, shift: null, activity: null, note: null },
     );
   }
+  const setCols = (patch: Partial<GridColsMapping>) => mapping?.format === 'gridCols' && setMapping({ ...mapping, ...patch });
 
   return (
     <div className="card">
       <div className="card-head">
         <h2>2. Come è fatto il file</h2>
         {mapping ? (
-          <span className="pill pill-ok">Riconosciuto: {mapping.format === 'grid' ? 'griglia persone × giorni' : 'elenco di blocchi'}</span>
+          <span className="pill pill-ok">
+            Riconosciuto: {mapping.format === 'grid' ? 'griglia persone × giorni' : mapping.format === 'gridCols' ? 'griglia giorni × persone' : 'elenco di blocchi'}
+          </span>
         ) : (
           <span className="pill pill-warn">Formato non riconosciuto: indica le colonne</span>
         )}
@@ -481,9 +599,10 @@ function MappingCard(props: {
           )}
           <label className="field">
             <span>Formato</span>
-            <select id="imp-format" className="select" value={mapping?.format ?? ''} onChange={(e) => switchFormat(e.target.value as 'grid' | 'list')}>
+            <select id="imp-format" className="select" value={mapping?.format ?? ''} onChange={(e) => switchFormat(e.target.value as 'grid' | 'list' | 'gridCols')}>
               {!mapping && <option value="">Scegli…</option>}
-              <option value="grid">Griglia (persone × giorni)</option>
+              <option value="gridCols">Griglia (un giorno per riga, una persona per colonna)</option>
+              <option value="grid">Griglia (una persona per riga, un giorno per colonna)</option>
               <option value="list">Elenco (una riga per blocco)</option>
             </select>
           </label>
@@ -535,6 +654,21 @@ function MappingCard(props: {
           </>
         )}
 
+        {mapping?.format === 'gridCols' && (
+          <>
+            <div className="row">
+              <label className="field">
+                <span>Colonna con le date</span>
+                <select id="imp-gc-date" className="select" value={mapping.dateCol} onChange={(e) => setCols({ dateCol: Number(e.target.value) })}>{colOpt}</select>
+              </label>
+            </div>
+            <div className="small muted">
+              Persone trovate ({mapping.personCols.length}): {mapping.personCols.map((p) => p.name).join(', ') || 'nessuna, controlla la riga delle intestazioni'}.
+              Le righe di totali e le colonne di statistiche vengono ignorate.
+            </div>
+          </>
+        )}
+
         {mapping?.format === 'list' && (
           <div className="row">
             {(
@@ -575,7 +709,9 @@ function Preview({ rows, headerRow }: { rows: Rows; headerRow: number }) {
             <tr key={i} style={i === 0 ? { background: '#fbfbfc', fontWeight: 600 } : undefined}>
               <td className="muted tabnum" style={{ width: 36 }}>{headerRow + i + 1}</td>
               {Array.from({ length: width }, (_, j) => (
-                <td key={j} style={{ whiteSpace: 'nowrap', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis' }}>{r?.[j] === null || r?.[j] === undefined ? '' : String(r[j])}</td>
+                <td key={j} style={{ whiteSpace: 'nowrap', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {r?.[j] === null || r?.[j] === undefined ? '' : typeof r[j] === 'number' && (r[j] as number) > 20000 && (r[j] as number) < 80000 ? fmtDay(serialToDate(r[j] as number), 'd MMM yyyy') : String(r[j])}
+                </td>
               ))}
             </tr>
           ))}

@@ -346,6 +346,17 @@ begin
       and (public.norm_name(p.full_name) = public.norm_name(nm)
            or public.norm_name(nm) in (select public.norm_name(a) from unnest(p.aliases) a));
     if n <> 1 then
+      pid := null;   -- nessuna corrispondenza o ambigua
+    end if;
+  end if;
+
+  if pid is null then
+    -- profilo importato col solo cognome ("Borra" → "Claudia Borra"), se è l'unico
+    select count(*), (array_agg(id))[1] into n, pid
+    from public.people p
+    where p.user_id is null and p.email is null
+      and string_to_array(public.norm_name(p.full_name), ' ') <@ string_to_array(public.norm_name(nm), ' ');
+    if n <> 1 then
       pid := null;   -- nessuna corrispondenza o ambigua: profilo nuovo
     end if;
   end if;

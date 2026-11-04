@@ -217,4 +217,16 @@ begin
 end $$;
 reset role;
 
+-- Import col solo cognome: "Borra" si collega a "Claudia Borra" al primo accesso
+reset role;
+insert into people (full_name) values ('Borra'), ('Li Vigni');
+insert into auth.users (id, email, raw_user_meta_data) values
+  ('00000000-0000-0000-0000-0000000000c1', 'claudia.borra@azienda.it', '{"full_name":"Claudia Borra"}'),
+  ('00000000-0000-0000-0000-0000000000c2', 'maria.livigni@azienda.it', '{"full_name":"Maria Li Vigni"}');
+do $$ begin
+  assert (select count(*) from people where full_name in ('Borra', 'Li Vigni')) = 0, 'placeholder rinominati';
+  assert (select 'Borra' = any (aliases) from people where email = 'claudia.borra@azienda.it'), 'cognome come alias';
+  assert exists (select 1 from people where email = 'maria.livigni@azienda.it' and 'Li Vigni' = any (aliases)), 'cognome composto';
+end $$;
+
 select 'TUTTI I TEST SQL PASSATI';

@@ -23,6 +23,7 @@ export interface ParsedItem {
   activity: string | null; // etichetta come scritta nel file (null = attività predefinita)
   allDay: boolean;        // assenza di giornata intera senza orari
   note: string | null;
+  fill: string | null;    // colore di sfondo della cella (es. 'FF0000'), se presente
   row: number;            // riga Excel (1-based)
   col: number | null;     // colonna (0-based) per la griglia
 }
@@ -61,7 +62,18 @@ export interface ListMapping {
   note: number | null;
 }
 
-export type Mapping = GridMapping | ListMapping;
+/** Griglia trasposta: giorni sulle righe, persone sulle colonne */
+export interface GridColsMapping {
+  format: 'gridCols';
+  headerRow: number;
+  dateCol: number;
+  personCols: { col: number; name: string }[];
+}
+
+export type Mapping = GridMapping | ListMapping | GridColsMapping;
+
+/** Colori di sfondo delle celle, stessa forma di Rows ('RRGGBB' o null) */
+export type Fills = (string | null)[][];
 
 export interface ParseOptions {
   tz: string;
@@ -212,7 +224,7 @@ export function parseTime(v: Cell, year: number): { date: string | null; min: nu
 const REST = new Set(['', 'r', 'rip', 'riposo', 'riposo settimanale', 'rs', 'off', 'libero', 'l', '-', '--', '—', '–', 'x', '/', 'n/a', 'na', 'smonto', 'day off', 'rest']);
 
 const RANGE_RE =
-  /(\d{1,2})(?:[:.,h](\d{2}))?\s*(?:-|–|—|\/|>|alle|a|to)\s*(\d{1,2})(?:[:.,h](\d{2}))?(?!\d)/g;
+  /(\d{1,2})(?:[:.,h](\d{2}))?\s*(?:-+|–|—|\/|>|alle|a|to)\s*(\d{1,2})(?:[:.,h](\d{2}))?(?!\d)/g;
 
 export interface CellSegment {
   start: number; // minuti
@@ -234,7 +246,11 @@ function cleanLabel(s: string): string | null {
 export function parseShiftCell(v: Cell): CellParse {
   if (v === null || v === undefined) return { kind: 'rest' };
   if (typeof v === 'number') return { kind: 'error', message: 'Numero senza orario: scrivi ad esempio 08:00-16:00' };
-  const text = String(v).replace(/ /g, ' ').trim();
+  const text = String(v)
+    .replace(/\u00a0/g, ' ')
+    .trim()
+    // refuso frequente: "09:30:18:30" al posto di "09:30-18:30"
+    .replace(/(^|\s)(\d{1,2}[:.]\d{2})[:.](\d{1,2}[:.]\d{2})(?=\s|$)/g, '$1$2-$3');
   if (REST.has(plain(text))) return { kind: 'rest' };
 
   const matches: { m: RegExpExecArray; s: number; e: number }[] = [];
@@ -382,8 +398,126 @@ export function detectGrid(rows: Rows, opts: ParseOptions): GridMapping | null {
   return null;
 }
 
+/**
+ * Griglia trasposta: una colonna con le date (una riga per giorno) e una colonna
+ * per persona, con il nome nell'intestazione. Righe di totali e colonne di
+ * statistiche (es. "Apertura", "Dopo 18:00") vengono ignorate da sole.
+ */
+export function detectGridCols(rows: Rows, opts: ParseOptions): GridColsMapping | null {
+  const scan = rows.slice(0, 400);
+  const width = scan.reduce((w, r) => Math.max(w, r?.length ?? 0), 0);
+  let dateCol = -1;
+  let best = 0;
+  for (let c = 0; c < Math.min(width, 6); c++) {
+    const n = scan.filter((r) => parseDate(r?.[c], opts.year)).length;
+    if (n > best) {
+      best = n;
+      dateCol = c;
+    }
+  }
+  if (dateCol < 0 || best < 3) return null;
+  const dateRows = scan.map((r, i) => (parseDate(r?.[dateCol], opts.year) ? i : -1)).filter((i) => i >= 0);
+  // intestazione: la riga sopra la prima data con più testi
+  let headerRow = -1;
+  for (let r = dateRows[0]! - 1; r >= 0; r--) {
+    const texts = (rows[r] ?? []).filter((v) => typeof v === 'string' && v.trim()).length;
+    if (texts >= 2) {
+      headerRow = r;
+      break;
+    }
+  }
+  if (headerRow < 0) return null;
+  const header = rows[headerRow] ?? [];
+  const personCols: { col: number; name: string }[] = [];
+  for (let c = 0; c < width; c++) {
+    if (c === dateCol) continue;
+    const name = String(header[c] ?? '').trim();
+    if (!name || /\d/.test(name)) continue;
+    const cells = dateRows.map((r) => rows[r]?.[c]).filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    if (!cells.length) continue;
+    if (cells.filter((v) => weekdayIndex(v) !== null).length > cells.length / 2) continue; // colonna "Giorno"
+    const kinds = cells.map((v) => parseShiftCell(v).kind);
+    const segments = kinds.filter((k) => k === 'segments').length;
+    const ok = kinds.filter((k) => k !== 'error').length;
+    if (segments >= Math.max(1, cells.length * 0.15) && ok >= cells.length * 0.7) personCols.push({ col: c, name });
+  }
+  if (personCols.length < 1) return null;
+  // colonne in mezzo al blocco persone senza orari (es. "MATERNITÀ" tutto il mese)
+  const first = personCols[0]!.col;
+  const last = personCols[personCols.length - 1]!.col;
+  for (let c = first + 1; c < last; c++) {
+    if (personCols.some((p) => p.col === c)) continue;
+    const name = String(header[c] ?? '').trim();
+    if (!name || /\d/.test(name)) continue;
+    const cells = dateRows.map((r) => rows[r]?.[c]).filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
+    if (cells.some((v) => typeof v === 'number')) continue;
+    if (cells.filter((v) => weekdayIndex(v) !== null).length > cells.length / 2) continue;
+    personCols.push({ col: c, name });
+  }
+  personCols.sort((a, b) => a.col - b.col);
+  return { format: 'gridCols', headerRow, dateCol, personCols };
+}
+
+export function parseGridCols(rows: Rows, map: GridColsMapping, opts: ParseOptions, fills?: Fills): ParseResult {
+  const items: ParsedItem[] = [];
+  const issues: ParseIssue[] = [];
+  let restCells = 0;
+  for (let r = map.headerRow + 1; r < rows.length; r++) {
+    const row = rows[r] ?? [];
+    const date = parseDate(row[map.dateCol], opts.year);
+    if (!date) continue; // righe vuote, totali, "settimana 1", "1° ore"…
+    for (const { col, name } of map.personCols) {
+      const v = row[col];
+      const p = { name, email: null, key: `n:${normName(name)}` };
+      const fill = fillAt(fills, r, col);
+      const res = parseShiftCell(v);
+      if (res.kind === 'rest') {
+        restCells++;
+        continue;
+      }
+      if (res.kind === 'error') {
+        issues.push({ row: r + 1, col, text: String(v ?? ''), message: res.message });
+        continue;
+      }
+      if (res.kind === 'allDay') {
+        items.push({ ...p, s: localToUtc(date, '00:00', opts.tz), e: localToUtc(addDays(date, 1), '00:00', opts.tz), activity: res.label, allDay: true, note: null, fill, row: r + 1, col });
+        continue;
+      }
+      for (const seg of res.segments) {
+        const [s, e] = toRange(date, seg.start, seg.end, opts.tz);
+        items.push({ ...p, s, e, activity: seg.label, allDay: false, note: null, fill, row: r + 1, col });
+      }
+    }
+  }
+  return { items, issues, restCells };
+}
+
 export function detect(rows: Rows, opts: ParseOptions): Mapping | null {
-  return detectList(rows) ?? detectGrid(rows, opts);
+  return detectList(rows) ?? detectGrid(rows, opts) ?? detectGridCols(rows, opts);
+}
+
+/**
+ * Legenda dei colori: celle colorate vuote con accanto un'etichetta
+ * (es. ■ Ferie, ■ Rec). Cerca in tutti i fogli del file.
+ */
+export function detectLegend(sheets: { rows: Rows; fills: Fills }[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const { rows, fills } of sheets) {
+    fills.forEach((fr, r) =>
+      fr?.forEach((_, c) => {
+        const f = fillAt(fills, r, c);
+        if (!f) return;
+        const v = rows[r]?.[c];
+        if (v !== null && v !== undefined && String(v).trim() !== '') return;
+        const label = rows[r]?.[c + 1];
+        if (typeof label !== 'string') return;
+        const t = label.trim();
+        if (!t || t.length > 30 || parseShiftCell(t).kind === 'segments') return;
+        if (!out.has(f)) out.set(f, t);
+      }),
+    );
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -401,6 +535,14 @@ function personOf(row: Cell[], nameCols: number[], emailCol: number | null) {
   return { name: name || email!, email, key: email ?? `n:${normName(name)}` };
 }
 
+/** colore significativo della cella (il bianco e il nero non contano) */
+export function fillAt(fills: Fills | undefined, r: number, c: number): string | null {
+  const f = fills?.[r]?.[c];
+  if (!f) return null;
+  const u = f.toUpperCase().slice(-6);
+  return u === 'FFFFFF' || u === '000000' ? null : u;
+}
+
 const minToTime = (min: number) => `${pad(Math.floor(min / 60) % 24)}:${pad(min % 60)}`;
 
 function toRange(date: string, startMin: number, endMin: number, tz: string): [number, number] {
@@ -409,7 +551,7 @@ function toRange(date: string, startMin: number, endMin: number, tz: string): [n
   return [localToUtc(sDate, minToTime(startMin % 1440), tz), localToUtc(eDate, minToTime(endMin % 1440), tz)];
 }
 
-export function parseGrid(rows: Rows, map: GridMapping, opts: ParseOptions): ParseResult {
+export function parseGrid(rows: Rows, map: GridMapping, opts: ParseOptions, fills?: Fills): ParseResult {
   const items: ParsedItem[] = [];
   const issues: ParseIssue[] = [];
   let restCells = 0;
@@ -433,19 +575,19 @@ export function parseGrid(rows: Rows, map: GridMapping, opts: ParseOptions): Par
       if (res.kind === 'allDay') {
         const s = localToUtc(date, '00:00', opts.tz);
         const e = localToUtc(addDays(date, 1), '00:00', opts.tz);
-        items.push({ ...p, s, e, activity: res.label, allDay: true, note: null, row: r + 1, col });
+        items.push({ ...p, s, e, activity: res.label, allDay: true, note: null, fill: fillAt(fills, r, col), row: r + 1, col });
         continue;
       }
       for (const seg of res.segments) {
         const [s, e] = toRange(date, seg.start, seg.end, opts.tz);
-        items.push({ ...p, s, e, activity: seg.label, allDay: false, note: null, row: r + 1, col });
+        items.push({ ...p, s, e, activity: seg.label, allDay: false, note: null, fill: fillAt(fills, r, col), row: r + 1, col });
       }
     }
   }
   return { items, issues, restCells };
 }
 
-export function parseList(rows: Rows, map: ListMapping, opts: ParseOptions): ParseResult {
+export function parseList(rows: Rows, map: ListMapping, opts: ParseOptions, fills?: Fills): ParseResult {
   const items: ParsedItem[] = [];
   const issues: ParseIssue[] = [];
   let restCells = 0;
@@ -459,6 +601,7 @@ export function parseList(rows: Rows, map: ListMapping, opts: ParseOptions): Par
     const dateCell = map.date !== null ? row[map.date] : null;
     const date = dateCell !== null && dateCell !== undefined ? parseDate(dateCell, opts.year) : null;
     const issue = (message: string, text: Cell = '') => issues.push({ row: r + 1, col: null, text: String(text ?? ''), message });
+    const rowFill = fillAt(fills, r, map.shift ?? map.start ?? map.activity ?? -1);
 
     if (map.shift !== null) {
       if (!date) {
@@ -475,12 +618,12 @@ export function parseList(rows: Rows, map: ListMapping, opts: ParseOptions): Par
         continue;
       }
       if (res.kind === 'allDay') {
-        items.push({ ...p, s: localToUtc(date, '00:00', opts.tz), e: localToUtc(addDays(date, 1), '00:00', opts.tz), activity: label ?? res.label, allDay: true, note, row: r + 1, col: null });
+        items.push({ ...p, s: localToUtc(date, '00:00', opts.tz), e: localToUtc(addDays(date, 1), '00:00', opts.tz), activity: label ?? res.label, allDay: true, note, fill: rowFill, row: r + 1, col: null });
         continue;
       }
       for (const seg of res.segments) {
         const [s, e] = toRange(date, seg.start, seg.end, opts.tz);
-        items.push({ ...p, s, e, activity: seg.label ?? label, allDay: false, note, row: r + 1, col: null });
+        items.push({ ...p, s, e, activity: seg.label ?? label, allDay: false, note, fill: rowFill, row: r + 1, col: null });
       }
       continue;
     }
@@ -490,7 +633,7 @@ export function parseList(rows: Rows, map: ListMapping, opts: ParseOptions): Par
     if (!st || !en) {
       // riga di assenza senza orari (es. "Ferie" con sola data)
       if (date && label && !st && !en) {
-        items.push({ ...p, s: localToUtc(date, '00:00', opts.tz), e: localToUtc(addDays(date, 1), '00:00', opts.tz), activity: label, allDay: true, note, row: r + 1, col: null });
+        items.push({ ...p, s: localToUtc(date, '00:00', opts.tz), e: localToUtc(addDays(date, 1), '00:00', opts.tz), activity: label, allDay: true, note, fill: rowFill, row: r + 1, col: null });
         continue;
       }
       issue('Orario di inizio o fine non riconosciuto', `${row[map.start ?? -1] ?? ''} – ${row[map.end ?? -1] ?? ''}`);
@@ -520,13 +663,15 @@ export function parseList(rows: Rows, map: ListMapping, opts: ParseOptions): Par
       issue('Blocco più lungo di 24 ore', `${row[map.start!]} – ${row[map.end!]}`);
       continue;
     }
-    items.push({ ...p, s, e, activity: label, allDay: false, note, row: r + 1, col: null });
+    items.push({ ...p, s, e, activity: label, allDay: false, note, fill: rowFill, row: r + 1, col: null });
   }
   return { items, issues, restCells };
 }
 
-export function parse(rows: Rows, map: Mapping, opts: ParseOptions): ParseResult {
-  return map.format === 'grid' ? parseGrid(rows, map, opts) : parseList(rows, map, opts);
+export function parse(rows: Rows, map: Mapping, opts: ParseOptions, fills?: Fills): ParseResult {
+  if (map.format === 'grid') return parseGrid(rows, map, opts, fills);
+  if (map.format === 'gridCols') return parseGridCols(rows, map, opts, fills);
+  return parseList(rows, map, opts, fills);
 }
 
 /** Colonne di un foglio con un'etichetta leggibile ("C · Inizio") */

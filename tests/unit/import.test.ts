@@ -144,3 +144,50 @@ test('collegamento persone e attività', () => {
   assert.equal(matchActivity('Telefono IT', [...acts])?.id, 'a');
   assert.equal(matchActivity('Chat', [...acts]), null);
 });
+
+test('griglia trasposta (giorni sulle righe, persone sulle colonne) con colori', async () => {
+  const { detectGridCols, detectLegend } = await import('../../src/lib/import/parse');
+  const rows: Rows = [
+    [null, 'Giorno', 'Borra', 'Dal Col', 'Gunia', 'Barbara Pertile', null, 'Apertura', 'Dopo 18:00'],
+    [46293, 'lunedì', '09:00-18:00', 'MATERNITÀ', '09:30:18:30', '09:00-13:00', null, 6, 2],
+    [46294, 'martedì', 'RIPOSO', 'MATERNITÀ', '11:00--20:00', 'RIPOSO', null, 5, 1],
+    [46295, 'mercoledì', '08:00 -14:00', 'MATERNITÀ', 'RIPOSO', '14:00-20:00', null, 4, 1],
+    [null, null, null, null, null, null],
+    [null, null, '2 weekend', '0 weekend', '1 weekend', '1 weekend'],
+    ['settimana 1', null, 1, 0, 1, 0],
+    ['1° ore', null, 45, 0, 44.99999, 20],
+    [null, null, null, null, null, null, null, null, null, null, 'Legenda'],
+    [null, null, null, null, null, null, null, null, null, null, null, 'Ferie'],
+  ];
+  const fills = rows.map(() => [] as (string | null)[]);
+  fills[1]![2] = 'FF0000'; // Rec
+  fills[9]![10] = '92D050'; // legenda: verde = Ferie
+  fills[3]![5] = '92D050';
+  const map = detectGridCols(rows, opts);
+  assert.ok(map);
+  assert.deepEqual(map!.personCols.map((p) => p.name), ['Borra', 'Dal Col', 'Gunia', 'Barbara Pertile']);
+  const res = parse(rows, map!, opts, fills);
+  assert.equal(res.issues.length, 0, JSON.stringify(res.issues));
+  assert.equal(res.items.filter((i) => i.name === 'Dal Col' && i.allDay).length, 3);
+  assert.equal(res.items.find((i) => i.name === 'Borra')!.fill, 'FF0000');
+  const gunia = res.items.filter((i) => i.name === 'Gunia');
+  assert.equal(hm(gunia[0]!.s), '2026-09-28 09:30');
+  assert.equal(hm(gunia[1]!.e), '2026-09-29 20:00');
+  assert.equal(res.items.find((i) => i.name === 'Barbara Pertile' && i.fill)!.fill, '92D050');
+  assert.equal(detectLegend([{ rows, fills }]).get('92D050'), 'Ferie');
+  assert.ok(res.items.every((i) => !['settimana 1', '1° ore'].includes(i.name)));
+});
+
+test('cognome da solo collegato al nome completo', () => {
+  const people = [
+    { id: '1', full_name: 'Claudia Borra', email: null, aliases: [], user_id: 'u1' },
+    { id: '2', full_name: 'Maria Li Vigni', email: null, aliases: [], user_id: 'u2' },
+    { id: '3', full_name: 'Paolo Benincaso', email: null, aliases: [], user_id: 'u3' },
+    { id: '4', full_name: 'Anna Rossi', email: null, aliases: [], user_id: 'u4' },
+    { id: '5', full_name: 'Luca Rossi', email: null, aliases: [], user_id: 'u5' },
+  ];
+  assert.deepEqual([matchPerson('Borra', null, people).status, matchPerson('Borra', null, people).person?.id], ['surname', '1']);
+  assert.equal(matchPerson('Li Vigni', null, people).person?.id, '2');
+  assert.equal(matchPerson('Bennincaso', null, people).candidates[0]?.id, '3');
+  assert.equal(matchPerson('Rossi', null, people).status, 'fuzzy', 'cognome condiviso: da confermare');
+});
