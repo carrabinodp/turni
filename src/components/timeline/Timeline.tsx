@@ -2,7 +2,9 @@
 import './timeline.css';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import type { Activity, ActivityKind, EventRow, Person } from '@/lib/types';
+import type { Activity, ActivityKind, DayMark, DayType, EventRow, Person } from '@/lib/types';
+import { autoBreaks, DEFAULT_RULES, type BreakRule } from '@/lib/breaks';
+import { AbsenceDialog, SwapDialog, type AbsenceInput, type SwapInput } from './ManagerDialogs';
 import {
   addDays, dayStart, diffDays, fmt, fmtDay, fmtTime, localDate, localToUtc, minutesLabel, todayIn, weekStart,
 } from '@/lib/time';
@@ -24,19 +26,27 @@ export interface Ev {
 export interface SavePayload {
   upserts: { id: string; person_id: string; activity_id: string; starts_at: string; ends_at: string; note: string | null; version?: string }[];
   deletes: { id: string; version?: string }[];
+  marks: { person_id: string; day: string; day_type_id: string | null }[];
   weeks: string[];
 }
+
+export type View = 'day' | 'week' | 'custom';
 
 export type ActionResult = { ok: true; message?: string } | { ok: false; error: string };
 
 export interface TimelineProps {
-  view: 'day' | 'week';
-  date: string; // giorno selezionato (YYYY-MM-DD)
+  view: View;
+  date: string; // giorno selezionato (YYYY-MM-DD); nel periodo personalizzato è l'inizio
+  to?: string; // fine del periodo personalizzato (inclusa)
   tz: string;
   people: Pick<Person, 'id' | 'full_name' | 'contract' | 'user_id'>[];
   activities: Activity[];
   events: EventRow[];
-  weekPublished: boolean;
+  dayTypes?: DayType[];
+  marks?: DayMark[];
+  publishedWeeks: string[];
+  breakRules?: BreakRule[];
+  breakActivityId?: string | null;
   canEdit: boolean;
   meId: string;
   snapMinutes: number;
@@ -44,16 +54,32 @@ export interface TimelineProps {
   onSave?: (p: SavePayload) => Promise<ActionResult>;
   onPublish?: (week: string, publish: boolean) => Promise<ActionResult>;
   onCopyWeek?: (src: string, dst: string) => Promise<ActionResult>;
+  onTimeOff?: (p: AbsenceInput) => Promise<ActionResult>;
+  onSwap?: (p: SwapInput) => Promise<ActionResult>;
   /** solo anteprima: niente navigazione */
-  navigate?: (date: string, view: 'day' | 'week') => void;
+  navigate?: (date: string, view: View, to?: string) => void;
 }
+
+type MarkMap = Record<string, string>; // `${person}|${giorno}` → tipo giornata
+const markKey = (p: string, d: string) => `${p}|${d}`;
+const toMarkMap = (m: DayMark[] = []): MarkMap => Object.fromEntries(m.map((x) => [markKey(x.person_id, x.day), x.day_type_id]));
 
 const NAME_W_WIDE = 236;
 const NAME_W_NARROW = 128;
 const ROW_H = 46;
 const HEAD_H = 34;
 const METRIC_H = 34;
-const ZOOM: Record<'day' | 'week', number[]> = { day: [0.75, 1.05, 1.45, 2, 2.8], week: [0.09, 0.13, 0.19, 0.27] };
+const ZOOM: Record<View, number[]> = {
+  day: [0.75, 1.05, 1.45, 2, 2.8],
+  week: [0.5, 0.75, 1, 1.5, 2.5, 4], // moltiplicatori di "adatta allo schermo"
+  custom: [0.5, 0.75, 1, 1.5, 2.5, 4],
+};
+/** minuti dalla mezzanotte locale */
+const minuteOfDay = (ms: number, tz: string) => {
+  const [h, m] = fmtTime(ms, tz).split(':').map(Number);
+  return h! * 60 + m!;
+};
+const MAX_CUSTOM_DAYS = 62;
 const KIND_ORDER: Record<ActivityKind, number> = { work: 0, break: 1, absence: 2 };
 const MIN = 60000;
 
@@ -101,28 +127,79 @@ export default function Timeline(props: TimelineProps) {
   const NAME_W = narrow ? NAME_W_NARROW : NAME_W_WIDE;
 
   /* ---- intervallo visibile ---- */
-  const rangeDate = view === 'day' ? date : weekStart(date);
-  const days = view === 'day' ? 1 : 7;
+  const rangeDate = view === 'week' ? weekStart(date) : date;
+  const days = view === 'day' ? 1 : view === 'week' ? 7 : Math.min(MAX_CUSTOM_DAYS, Math.max(1, diffDays(date, props.to ?? date) + 1));
+  const rangeEnd = addDays(rangeDate, days - 1);
   const startMs = useMemo(() => dayStart(rangeDate, tz), [rangeDate, tz]);
   const endMs = useMemo(() => dayStart(addDays(rangeDate, days), tz), [rangeDate, days, tz]);
   const totalMin = (endMs - startMs) / MIN;
 
-  const [zoomIdx, setZoomIdx] = useState(view === 'day' ? 1 : 1);
-  useEffect(() => setZoomIdx(1), [view]);
-  const ppm = ZOOM[view][Math.min(zoomIdx, ZOOM[view].length - 1)]!;
-  const trackW = Math.round(totalMin * ppm);
-  const x = useCallback((ms: number) => ((ms - startMs) / MIN) * ppm, [startMs, ppm]);
+  // settimana e periodo: si mostrano solo le ore lavorate (es. 07–21), adattate allo schermo
+  const compact = view !== 'day';
+  const win = useMemo(() => {
+    if (!compact) return { h0: 0, h1: 24 };
+    let lo = 7 * 60, hi = 21 * 60;
+    for (const r of props.events) {
+      const s0 = Date.parse(r.starts_at), e0 = Date.parse(r.ends_at);
+      if (e0 <= startMs || s0 >= endMs) continue;
+      if (localDate(s0, tz) !== localDate(e0 - 1, tz)) return { h0: 0, h1: 24 }; // turno notturno
+      lo = Math.min(lo, minuteOfDay(s0, tz));
+      hi = Math.max(hi, minuteOfDay(e0 - 1, tz) + 1);
+    }
+    return { h0: Math.max(0, Math.floor(lo / 60)), h1: Math.min(24, Math.ceil(hi / 60)) };
+  }, [compact, props.events, startMs, endMs, tz]);
+  const winMin = (win.h1 - win.h0) * 60;
+  const dayStarts = useMemo(() => Array.from({ length: days + 1 }, (_, i) => dayStart(addDays(rangeDate, i), tz)), [days, rangeDate, tz]);
+
+  const [zoomIdx, setZoomIdx] = useState(compact ? 2 : 1);
+  useEffect(() => setZoomIdx(view === 'day' ? 1 : 2), [view]);
+  const [vw, setVw] = useState(1200);
+  const ppm = compact
+    ? Math.max(0.006, (vw - NAME_W - 4) / (days * winMin)) * ZOOM[view][Math.min(zoomIdx, ZOOM[view].length - 1)]!
+    : ZOOM.day[Math.min(zoomIdx, ZOOM.day.length - 1)]!;
+  const dayW = winMin * ppm;
+  const trackW = Math.round(compact ? days * dayW : totalMin * ppm);
+  const x = useCallback(
+    (ms: number) => {
+      if (!compact) return ((ms - startMs) / MIN) * ppm;
+      if (ms <= startMs) return 0;
+      if (ms >= endMs) return days * dayW;
+      let i = days - 1;
+      while (i > 0 && ms < dayStarts[i]!) i--;
+      const f = Math.min(1, Math.max(0, ((ms - dayStarts[i]!) / MIN - win.h0 * 60) / winMin));
+      return (i + f) * dayW;
+    },
+    [compact, startMs, endMs, ppm, days, dayW, dayStarts, win.h0, winMin],
+  );
+  /** posizione orizzontale (px dentro la traccia) → istante */
+  const msAt = useCallback(
+    (px: number) => {
+      if (!compact) return startMs + (px / ppm) * MIN;
+      const i = Math.min(days - 1, Math.max(0, Math.floor(px / dayW)));
+      const f = Math.min(1, Math.max(0, (px - i * dayW) / dayW));
+      return dayStarts[i]! + (win.h0 * 60 + f * winMin) * MIN;
+    },
+    [compact, startMs, ppm, days, dayW, dayStarts, win.h0, winMin],
+  );
 
   const actById = useMemo(() => new Map(activities.map((a) => [a.id, a])), [activities]);
   const usable = useMemo(() => activities.filter((a) => !a.archived), [activities]);
+  const dayTypes = useMemo(() => (props.dayTypes ?? []).filter((d) => !d.archived), [props.dayTypes]);
+  const dtById = useMemo(() => new Map((props.dayTypes ?? []).map((d) => [d.id, d])), [props.dayTypes]);
+  const breakAct = props.breakActivityId ?? usable.find((a) => a.kind === 'break')?.id ?? null;
 
   /* ---- stato eventi con annulla/ripeti ---- */
   const [evs, setEvs] = useState<Ev[]>(() => props.events.map(toEv));
   const evsRef = useRef(evs);
   evsRef.current = evs;
   const original = useRef(new Map(props.events.map((r) => [r.id, toEv(r)])));
-  const past = useRef<Ev[][]>([]);
-  const future = useRef<Ev[][]>([]);
+  const [marks, setMarks] = useState<MarkMap>(() => toMarkMap(props.marks));
+  const marksRef = useRef(marks);
+  marksRef.current = marks;
+  const originalMarks = useRef<MarkMap>(toMarkMap(props.marks));
+  type Snap = { evs: Ev[]; marks: MarkMap };
+  const past = useRef<Snap[]>([]);
+  const future = useRef<Snap[]>([]);
   const [, force] = useState(0);
 
   useEffect(() => {
@@ -130,29 +207,36 @@ export default function Timeline(props: TimelineProps) {
     const list = props.events.map(toEv);
     setEvs(list);
     original.current = new Map(list.map((e) => [e.id, e]));
+    const m = toMarkMap(props.marks);
+    setMarks(m);
+    originalMarks.current = m;
     past.current = [];
     future.current = [];
     setSelected(new Set());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.serverKey]);
 
-  const commit = useCallback((next: Ev[]) => {
-    past.current.push(evsRef.current);
+  const commit = useCallback((next: Ev[], nextMarks?: MarkMap) => {
+    past.current.push({ evs: evsRef.current, marks: marksRef.current });
     if (past.current.length > 100) past.current.shift();
     future.current = [];
     setEvs(next);
+    if (nextMarks) setMarks(nextMarks);
   }, []);
+  const commitMarks = useCallback((nextMarks: MarkMap) => commit(evsRef.current, nextMarks), [commit]);
   const undo = useCallback(() => {
     const prev = past.current.pop();
     if (!prev) return;
-    future.current.push(evsRef.current);
-    setEvs(prev);
+    future.current.push({ evs: evsRef.current, marks: marksRef.current });
+    setEvs(prev.evs);
+    setMarks(prev.marks);
   }, []);
   const redo = useCallback(() => {
     const nxt = future.current.pop();
     if (!nxt) return;
-    past.current.push(evsRef.current);
-    setEvs(nxt);
+    past.current.push({ evs: evsRef.current, marks: marksRef.current });
+    setEvs(nxt.evs);
+    setMarks(nxt.marks);
   }, []);
 
   /* ---- differenze rispetto al server ---- */
@@ -169,8 +253,16 @@ export default function Timeline(props: TimelineProps) {
     original.current.forEach((o, id) => {
       if (!cur.has(id)) deletes.push(o);
     });
-    return { upserts, deletes, count: upserts.length + deletes.length };
-  }, [evs]);
+    const markChanges: SavePayload['marks'] = [];
+    const keys = new Set([...Object.keys(marks), ...Object.keys(originalMarks.current)]);
+    keys.forEach((k) => {
+      if ((marks[k] ?? null) !== (originalMarks.current[k] ?? null)) {
+        const [person_id, day] = k.split('|') as [string, string];
+        markChanges.push({ person_id, day, day_type_id: marks[k] ?? null });
+      }
+    });
+    return { upserts, deletes, markChanges, count: upserts.length + deletes.length + markChanges.length };
+  }, [evs, marks]);
   const dirty = diff.count > 0;
 
   useEffect(() => {
@@ -192,6 +284,8 @@ export default function Timeline(props: TimelineProps) {
   const [snapOn, setSnapOn] = useState(true);
   const [preview, setPreview] = useState<Map<string, Ev> | null>(null);
   const [menu, setMenu] = useState<{ person: string; x: number; y: number } | null>(null);
+  const [dayMenu, setDayMenu] = useState<{ person: string; day: string; t: number; x: number; y: number } | null>(null);
+  const [dialog, setDialog] = useState<{ kind: 'absence' | 'swap'; person: string; day: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ msg: string; bad?: boolean } | null>(null);
   const clipboard = useRef<Ev[]>([]);
@@ -251,24 +345,30 @@ export default function Timeline(props: TimelineProps) {
   }, [people, search, onlyWorking, byPerson, sort, canEdit, meId]);
 
   /* ---- metriche: persone in servizio per fascia ---- */
-  const slotMin = view === 'day' ? 30 : 120;
+  const hourPx = 60 * ppm;
+  const slotMin = view === 'day' ? 30 : hourPx * 2 >= 22 ? 120 : hourPx * 4 >= 22 ? 240 : winMin;
   const metrics = useMemo(() => {
     const slots: number[] = [];
-    for (let t = startMs; t < endMs; t += slotMin * MIN) slots.push(t);
+    if (!compact) for (let t = startMs; t < endMs; t += slotMin * MIN) slots.push(t);
+    else
+      for (let i = 0; i < days; i++)
+        for (let m = win.h0 * 60; m < win.h1 * 60; m += slotMin) slots.push(dayStarts[i]! + m * MIN);
     const workActs = usable.filter((a) => a.kind === 'work');
     const per = new Map<string, number[]>(workActs.map((a) => [a.id, slots.map(() => 0)]));
     const total = slots.map(() => 0);
     byPerson.forEach((list) => {
       slots.forEach((t, i) => {
         const mid = t + (slotMin * MIN) / 2;
+        const whole = slotMin >= 240; // fasce lunghe: conta chi lavora in quella fascia
         let workAct: Ev | null = null;
         let blocked = false;
         for (const e of list) {
-          if (e.s <= mid && e.e > mid) {
+          const hit = whole ? e.s < t + slotMin * MIN && e.e > t : e.s <= mid && e.e > mid;
+          if (hit) {
             const k = actById.get(e.activity_id)?.kind;
             if (k === 'work') {
               if (!workAct || e.e - e.s < workAct.e - workAct.s) workAct = e;
-            } else blocked = true;
+            } else if (k === 'absence' || !whole) blocked = true;
           }
         }
         if (workAct && !blocked) {
@@ -281,13 +381,22 @@ export default function Timeline(props: TimelineProps) {
     const max = Math.max(1, ...total);
     const actRows = workActs.filter((a) => per.get(a.id)!.some((n) => n > 0)).map((a) => ({ a, values: per.get(a.id)! }));
     return { slots, total, max, actRows };
-  }, [byPerson, startMs, endMs, slotMin, usable, actById]);
+  }, [byPerson, startMs, endMs, slotMin, usable, actById, compact, days, win.h0, win.h1, dayStarts]);
 
   /* ---- scroll iniziale ---- */
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (view === 'week') {
+    setVw(el.clientWidth);
+    const ro = new ResizeObserver(() => setVw(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (view !== 'day') {
       el.scrollLeft = 0;
       return;
     }
@@ -310,7 +419,7 @@ export default function Timeline(props: TimelineProps) {
   const snapMs = (ms: number) => Math.round(ms / (snap * MIN)) * snap * MIN;
   const msAtClientX = (clientX: number) => {
     const g = gridRef.current!.getBoundingClientRect();
-    return startMs + ((clientX - g.left - NAME_W) / ppm) * MIN;
+    return msAt(clientX - g.left - NAME_W);
   };
   const personAt = (clientX: number, clientY: number): string | null => {
     const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
@@ -365,7 +474,7 @@ export default function Timeline(props: TimelineProps) {
     d.moved = true;
     const snapNow = canEdit && snapOn && !e.altKey ? snapMinutes : 1;
     const snapD = (ms: number) => Math.round(ms / (snapNow * MIN)) * snapNow * MIN;
-    const dMs = ((e.clientX - d.x0) / ppm) * MIN;
+    const dMs = msAtClientX(e.clientX) - msAtClientX(d.x0);
     const p = new Map<string, Ev>();
 
     if (d.mode === 'create') {
@@ -420,6 +529,26 @@ export default function Timeline(props: TimelineProps) {
     }
   }
 
+  function onContextMenu(e: React.MouseEvent) {
+    if (!canEdit) return;
+    const t = e.target as HTMLElement;
+    const track = t.closest('[data-person]') as HTMLElement | null;
+    if (!track || t.closest('.tl-name')) return;
+    e.preventDefault();
+    const ms = msAtClientX(e.clientX);
+    const w = (e.currentTarget.closest('.tl-wrap') as HTMLElement).getBoundingClientRect();
+    const evId = (t.closest('[data-ev]') as HTMLElement | null)?.dataset.ev;
+    if (evId && !selected.has(evId)) setSelected(new Set([evId]));
+    setMenu(null);
+    setDayMenu({
+      person: track.dataset.person!,
+      day: localDate(ms, tz),
+      t: ms,
+      x: Math.min(e.clientX - w.left, w.width - 250),
+      y: Math.min(e.clientY - w.top, w.height - 480),
+    });
+  }
+
   /* ---- operazioni ---- */
   const removeIds = useCallback((ids: Set<string>) => {
     if (!ids.size) return;
@@ -455,6 +584,48 @@ export default function Timeline(props: TimelineProps) {
     say(`Incollati ${created.length} blocchi`);
   }, [commit, date, say, shiftDays, tz, view]);
 
+  /** giornate (persona+giorno) coinvolte dalla selezione, oppure quella cliccata */
+  const targetDays = (person: string, day: string) => {
+    const set = new Set<string>([markKey(person, day)]);
+    evsRef.current.filter((e) => selected.has(e.id)).forEach((e) => set.add(markKey(e.person_id, localDate(e.s, tz))));
+    return Array.from(set);
+  };
+
+  const setDayType = (keys: string[], typeId: string | null) => {
+    const next = { ...marksRef.current };
+    keys.forEach((k) => {
+      if (typeId) next[k] = typeId;
+      else delete next[k];
+    });
+    commitMarks(next);
+    const dt = typeId ? dtById.get(typeId)?.name : null;
+    say(dt ? `${keys.length > 1 ? `${keys.length} giornate` : 'Giornata'}: ${dt}` : 'Tipo giornata tolto');
+  };
+
+  const blocksFor = (list: Ev[]) =>
+    list.map((e) => ({ person_id: e.person_id, s: e.s, e: e.e, kind: actById.get(e.activity_id)?.kind ?? ('work' as const) }));
+
+  const addAutoBreaks = (filter: (e: Ev) => boolean, label: string) => {
+    if (!breakAct) return say('Manca un’attività di tipo pausa: creala in Configura', true);
+    const scope = evsRef.current.filter(filter);
+    const created = autoBreaks(blocksFor(scope), props.breakRules?.length ? props.breakRules : DEFAULT_RULES, Math.min(snapMinutes, 5)).map(
+      (b) => ({ id: uuid(), person_id: b.person_id, activity_id: breakAct, s: b.s, e: b.e, note: null, version: null }),
+    );
+    if (!created.length) return say(`Nessuna pausa da aggiungere ${label}: ci sono già o i turni sono brevi`);
+    commit([...evsRef.current, ...created]);
+    say(`Aggiunte ${created.length} pause ${label}. Puoi spostarle e poi salvare.`);
+  };
+
+  const addBreakAt = (person: string, t: number, minutes = 15) => {
+    if (!breakAct) return say('Manca un’attività di tipo pausa: creala in Configura', true);
+    const s = Math.round(t / (5 * MIN)) * 5 * MIN;
+    const created = { id: uuid(), person_id: person, activity_id: breakAct, s, e: s + minutes * MIN, note: null, version: null };
+    commit([...evsRef.current, created]);
+    setSelected(new Set([created.id]));
+  };
+
+  const dayRange = (day: string) => [dayStart(day, tz), dayStart(addDays(day, 1), tz)] as const;
+
   /* ---- tastiera ---- */
   useEffect(() => {
     if (!canEdit) return;
@@ -487,6 +658,7 @@ export default function Timeline(props: TimelineProps) {
       } else if (e.key === 'Escape') {
         setSelected(new Set());
         setMenu(null);
+        setDayMenu(null);
       } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && selected.size) {
         e.preventDefault();
         const d = (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 60 : snapMinutes) * MIN;
@@ -503,14 +675,33 @@ export default function Timeline(props: TimelineProps) {
   }, [canEdit, selected, undo, redo, paste, removeIds, updateSel, usable, snapMinutes, say, startMs, endMs]);
 
   /* ---- navigazione ---- */
-  const go = (d: string, v: 'day' | 'week' = view) => {
+  const go = (d: string, v: View = view, to?: string) => {
     if (dirty && !window.confirm('Hai modifiche non salvate. Vuoi uscire senza salvarle?')) return;
-    if (props.navigate) return props.navigate(d, v);
-    router.push(`/timeline?d=${d}&v=${v}`);
+    let end = to;
+    if (v === 'custom' && !end) {
+      // periodo predefinito: il mese che contiene il giorno
+      const first = d.slice(0, 8) + '01';
+      const nextMonth = addDays(first, 32).slice(0, 8) + '01';
+      if (view !== 'custom') {
+        d = first;
+        end = addDays(nextMonth, -1);
+      } else end = addDays(d, days - 1);
+    }
+    if (end && diffDays(d, end) >= MAX_CUSTOM_DAYS) end = addDays(d, MAX_CUSTOM_DAYS - 1);
+    if (end && end < d) end = d;
+    if (props.navigate) return props.navigate(d, v, end);
+    router.push(`/timeline?d=${d}&v=${v}${v === 'custom' && end ? `&to=${end}` : ''}`);
   };
-  const step = view === 'day' ? 1 : 7;
+  const step = view === 'day' ? 1 : view === 'week' ? 7 : days;
   const today = todayIn(tz);
   const week = weekStart(date);
+  const published = new Set(props.publishedWeeks);
+  const weeksInRange = useMemo(() => {
+    const out: string[] = [];
+    for (let w = weekStart(rangeDate); w <= rangeEnd; w = addDays(w, 7)) out.push(w);
+    return out;
+  }, [rangeDate, rangeEnd]);
+  const unpublished = weeksInRange.filter((w) => !published.has(w));
 
   /* ---- salvataggio ---- */
   async function save() {
@@ -520,6 +711,7 @@ export default function Timeline(props: TimelineProps) {
     const add = (ms: number) => weeks.add(weekStart(localDate(ms, tz)));
     diff.upserts.forEach((e) => add(e.s));
     diff.deletes.forEach((e) => add(e.s));
+    diff.markChanges.forEach((m) => weeks.add(weekStart(m.day)));
     const res = await props.onSave({
       upserts: diff.upserts.map((e) => ({
         id: e.id, person_id: e.person_id, activity_id: e.activity_id,
@@ -527,6 +719,7 @@ export default function Timeline(props: TimelineProps) {
         ...(original.current.get(e.id)?.version ? { version: original.current.get(e.id)!.version! } : {}),
       })),
       deletes: diff.deletes.map((e) => ({ id: e.id, ...(e.version ? { version: e.version } : {}) })),
+      marks: diff.markChanges,
       weeks: Array.from(weeks),
     });
     setBusy(false);
@@ -540,7 +733,13 @@ export default function Timeline(props: TimelineProps) {
     if (!props.onPublish) return;
     if (dirty) return say('Salva prima le modifiche', true);
     setBusy(true);
-    const res = await props.onPublish(week, p);
+    const targets = view === 'custom' ? (p ? unpublished : weeksInRange.filter((w) => published.has(w))) : [week];
+    let res: ActionResult = { ok: true };
+    for (const w of targets) {
+      res = await props.onPublish(w, p);
+      if (!res.ok) break;
+    }
+    if (res.ok && targets.length > 1) res = { ok: true, message: p ? `${targets.length} settimane pubblicate` : `${targets.length} settimane tornate in bozza` };
     setBusy(false);
     if (res.ok) {
       say(res.message ?? (p ? 'Settimana pubblicata' : 'Pubblicazione ritirata'));
@@ -561,8 +760,22 @@ export default function Timeline(props: TimelineProps) {
     } else say(res.error, true);
   }
 
+  async function runManager(fn: () => Promise<ActionResult>) {
+    if (dirty) {
+      say('Salva prima le modifiche in corso', true);
+      return { ok: false as const, error: 'Salva prima le modifiche in corso' };
+    }
+    const res = await fn();
+    if (res.ok) {
+      say(res.message ?? 'Fatto');
+      setDialog(null);
+      router.refresh();
+    }
+    return res;
+  }
+
   /* ---- menu riga ---- */
-  const rangeLabel = view === 'day' ? 'giornata' : 'settimana';
+  const rangeLabel = view === 'day' ? 'giornata' : view === 'week' ? 'settimana' : 'periodo';
   function rowAction(kind: 'copy' | 'paste' | 'clear', person: string) {
     setMenu(null);
     const inRange = evsRef.current.filter((e) => e.person_id === person && e.e > startMs && e.s < endMs);
@@ -582,17 +795,19 @@ export default function Timeline(props: TimelineProps) {
   /* ---- render helpers ---- */
   const hourMarks = useMemo(() => {
     const marks: { ms: number; label: string; sub: string }[] = [];
-    const step = view === 'day' ? 60 : 360;
+    if (!compact) {
+      for (let t = startMs; t < endMs; t += 60 * MIN) marks.push({ ms: t, label: fmtTime(t, tz).slice(0, 2), sub: ':00' });
+      return marks;
+    }
+    const stepH = hourPx * 2 >= 26 ? 2 : hourPx * 3 >= 26 ? 3 : hourPx * 6 >= 26 ? 6 : 0;
+    if (!stepH) return marks;
     for (let d = 0; d < days; d++) {
-      const ds = dayStart(addDays(rangeDate, d), tz);
-      const de = dayStart(addDays(rangeDate, d + 1), tz);
-      for (let t = ds; t < de; t += step * MIN) {
-        const h = fmtTime(t, tz);
-        marks.push({ ms: t, label: h.slice(0, 2), sub: view === 'day' ? ':00' : '' });
+      for (let h = Math.ceil(win.h0 / stepH) * stepH; h < win.h1; h += stepH) {
+        marks.push({ ms: dayStarts[d]! + h * 60 * MIN, label: String(h).padStart(2, '0'), sub: '' });
       }
     }
     return marks;
-  }, [view, days, rangeDate, tz]);
+  }, [compact, startMs, endMs, tz, hourPx, days, win.h0, win.h1, dayStarts]);
 
   const dayMarks = useMemo(
     () => Array.from({ length: days }, (_, i) => {
@@ -607,31 +822,50 @@ export default function Timeline(props: TimelineProps) {
     if (view === 'day') {
       return `repeating-linear-gradient(to right, var(--line-2) 0 1px, transparent 1px ${hour / 2}px), repeating-linear-gradient(to right, var(--line) 0 1px, transparent 1px ${hour}px)`;
     }
-    return `repeating-linear-gradient(to right, var(--line) 0 1px, transparent 1px ${hour * 24}px), repeating-linear-gradient(to right, var(--line-2) 0 1px, transparent 1px ${hour * 6}px)`;
-  }, [ppm, view]);
+    const days = `repeating-linear-gradient(to right, var(--line) 0 1px, transparent 1px ${dayW}px)`;
+    if (hour < 8) return days;
+    return `${days}, repeating-linear-gradient(to right, var(--line-2) 0 1px, transparent 1px ${hour}px)`;
+  }, [ppm, view, dayW]);
 
   const selEvents = shown.filter((e) => selected.has(e.id));
-  const draftLabel = props.weekPublished ? 'Pubblicata' : 'Bozza';
+  const weekPublished = published.has(week);
+  const dayLabel = (px: number, d: string) =>
+    fmtDay(d, px >= 74 ? 'EEE d/M' : px >= 40 ? 'd/M' : 'd');
 
   /* ------------------------------------------------------------------ */
   return (
-    <div className="tl-wrap" onClick={() => menu && setMenu(null)}>
+    <div className="tl-wrap" onClick={() => { if (menu) setMenu(null); if (dayMenu) setDayMenu(null); }}>
       <div className="tl-top">
         <div className="tl-title">
           <h1>Timeline</h1>
           <div className="tl-bar">
-            {canEdit && (
+            {canEdit && view !== 'custom' && (
               <>
-                <span className={`pill ${props.weekPublished ? 'pill-ok' : 'pill-warn'}`} title="Stato della settimana">
-                  Settimana {fmtDay(week, 'd MMM')}: {draftLabel}
+                <span className={`pill ${weekPublished ? 'pill-ok' : 'pill-warn'}`} title="Stato della settimana">
+                  Settimana {fmtDay(week, 'd MMM')}: {weekPublished ? 'Pubblicata' : 'Bozza'}
                 </span>
-                {props.weekPublished ? (
+                {weekPublished ? (
                   <button className="btn btn-sm" disabled={busy} onClick={() => publish(false)}>Ritira</button>
                 ) : (
                   <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => publish(true)}>Pubblica settimana</button>
                 )}
                 <button className="btn btn-sm" disabled={busy} onClick={copyPrevWeek}>Copia settimana precedente</button>
               </>
+            )}
+            {canEdit && view === 'custom' && (
+              <>
+                <span className={`pill ${unpublished.length ? 'pill-warn' : 'pill-ok'}`}>
+                  Pubblicate {weeksInRange.length - unpublished.length} di {weeksInRange.length} settimane
+                </span>
+                {unpublished.length > 0 && (
+                  <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => publish(true)}>Pubblica il periodo</button>
+                )}
+              </>
+            )}
+            {canEdit && (
+              <button className="btn btn-sm" disabled={busy} onClick={() => addAutoBreaks((e) => e.e > startMs && e.s < endMs, 'nel periodo visibile')} title="Aggiunge le pause previste dalle regole a tutti i turni visibili">
+                Pause automatiche
+              </button>
             )}
           </div>
         </div>
@@ -640,21 +874,41 @@ export default function Timeline(props: TimelineProps) {
           <div className="seg" role="group" aria-label="Vista">
             <button aria-pressed={view === 'day'} onClick={() => go(date, 'day')}>Giorno</button>
             <button aria-pressed={view === 'week'} onClick={() => go(date, 'week')}>Settimana</button>
+            <button aria-pressed={view === 'custom'} onClick={() => go(date, 'custom')}>Periodo</button>
           </div>
-          <div className="tl-date">
-            <button aria-label="Precedente" onClick={() => go(addDays(date, -step))}><IcLeft width={16} /></button>
-            <input
-              id="tl-date"
-              type="date"
-              value={date}
-              onChange={(e) => e.target.value && go(e.target.value)}
-              aria-label="Data"
-            />
-            <button onClick={() => go(today)} disabled={date === today}>Oggi</button>
-            <button aria-label="Successivo" onClick={() => go(addDays(date, step))}><IcRight width={16} /></button>
-          </div>
+          {view === 'custom' ? (
+            <div className="tl-date">
+              <button aria-label="Periodo precedente" onClick={() => go(addDays(date, -step), 'custom', addDays(rangeEnd, -step))}><IcLeft width={16} /></button>
+              <input id="tl-from" type="date" value={date} aria-label="Dal" onChange={(e) => e.target.value && go(e.target.value, 'custom', rangeEnd < e.target.value ? e.target.value : rangeEnd)} />
+              <span className="tl-sep">→</span>
+              <input id="tl-to" type="date" value={rangeEnd} min={date} aria-label="Al" onChange={(e) => e.target.value && go(date, 'custom', e.target.value)} />
+              <button aria-label="Periodo successivo" onClick={() => go(addDays(date, step), 'custom', addDays(rangeEnd, step))}><IcRight width={16} /></button>
+            </div>
+          ) : (
+            <div className="tl-date">
+              <button aria-label="Precedente" onClick={() => go(addDays(date, -step))}><IcLeft width={16} /></button>
+              <input
+                id="tl-date"
+                type="date"
+                value={date}
+                onChange={(e) => e.target.value && go(e.target.value)}
+                aria-label="Data"
+              />
+              <button onClick={() => go(today)} disabled={date === today}>Oggi</button>
+              <button aria-label="Successivo" onClick={() => go(addDays(date, step))}><IcRight width={16} /></button>
+            </div>
+          )}
+          {view === 'custom' && (
+            <div className="seg" role="group" aria-label="Periodi rapidi">
+              <button onClick={() => go(weekStart(today), 'custom', addDays(weekStart(today), 13))}>2 settimane</button>
+              <button onClick={() => { const f = today.slice(0, 8) + '01'; go(f, 'custom', addDays(addDays(f, 32).slice(0, 8) + '01', -1)); }}>Questo mese</button>
+              <button onClick={() => { const f = addDays(today.slice(0, 8) + '01', 32).slice(0, 8) + '01'; go(f, 'custom', addDays(addDays(f, 32).slice(0, 8) + '01', -1)); }}>Mese prossimo</button>
+            </div>
+          )}
           <span className="muted" style={{ fontWeight: 500 }}>
-            {view === 'day' ? fmtDay(date, 'EEEE d MMMM yyyy') : `${fmtDay(rangeDate, 'd MMM')} – ${fmtDay(addDays(rangeDate, 6), 'd MMM yyyy')}`}
+            {view === 'day'
+              ? fmtDay(date, 'EEEE d MMMM yyyy')
+              : `${fmtDay(rangeDate, 'd MMM')} – ${fmtDay(rangeEnd, 'd MMM yyyy')}${view === 'custom' ? ` · ${days} giorni` : ''}`}
           </span>
           <span className="spacer" />
           <button className={`btn btn-sm${showMetrics ? '' : ' btn-ghost'}`} onClick={() => setShowMetrics((s) => !s)} aria-pressed={showMetrics}>
@@ -662,6 +916,13 @@ export default function Timeline(props: TimelineProps) {
           </button>
           <button className="btn btn-icon btn-sm" aria-label="Riduci" disabled={zoomIdx === 0} onClick={() => setZoomIdx((z) => Math.max(0, z - 1))}><IcMinus /></button>
           <button className="btn btn-icon btn-sm" aria-label="Ingrandisci" disabled={zoomIdx >= ZOOM[view].length - 1} onClick={() => setZoomIdx((z) => Math.min(ZOOM[view].length - 1, z + 1))}><IcPlus /></button>
+          {dayTypes.length > 0 && (
+            <div className="legend-days" aria-label="Tipi di giornata">
+              {dayTypes.map((d) => (
+                <span key={d.id}><i style={{ background: d.color }} />{d.name}</span>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="tl-bar">
@@ -694,8 +955,12 @@ export default function Timeline(props: TimelineProps) {
         </div>
       </div>
 
-      {!canEdit && !props.weekPublished && (
-        <div className="tl-banner alert alert-info">I turni di questa settimana non sono ancora stati pubblicati.</div>
+      {!canEdit && unpublished.length > 0 && (
+        <div className="tl-banner alert alert-info">
+          {view === 'custom' && unpublished.length < weeksInRange.length
+            ? `Alcune settimane del periodo non sono ancora pubblicate (${unpublished.map((w) => fmtDay(w, 'd MMM')).join(', ')}).`
+            : 'I turni di questa settimana non sono ancora stati pubblicati.'}
+        </div>
       )}
 
       <div className="tl-scroll" ref={scrollRef}>
@@ -710,31 +975,37 @@ export default function Timeline(props: TimelineProps) {
             drag.current = null;
             setPreview(null);
           }}
+          onContextMenu={onContextMenu}
         >
           {/* testata */}
           <div className="tl-head">
-            {view === 'week' && (
+            {view !== 'day' && (
               <div className="tl-row tl-days" style={{ height: HEAD_H }}>
-                <div className="tl-name" style={{ width: NAME_W }}>Settimana</div>
+                <div className="tl-name" style={{ width: NAME_W }}>{view === 'week' ? 'Settimana' : 'Giorno'}</div>
                 <div className="tl-track" style={{ width: trackW }}>
-                  {dayMarks.map((d) => (
-                    <span key={d.d} className={d.d === today ? 'today' : ''} style={{ left: x(d.s), width: x(d.e) - x(d.s) }}>
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        style={{ fontWeight: 600, color: 'inherit' }}
-                        onClick={() => go(d.d, 'day')}
-                        onPointerDown={(e) => e.stopPropagation()}
-                      >
-                        {fmtDay(d.d, 'EEE d/M')}
-                      </button>
-                    </span>
-                  ))}
+                  {dayMarks.map((d) => {
+                    const w = x(d.e) - x(d.s);
+                    const dow = new Date(d.d + 'T12:00:00Z').getUTCDay();
+                    return (
+                      <span key={d.d} className={`${d.d === today ? 'today' : ''}${dow === 0 || dow === 6 ? ' weekend' : ''}${dow === 1 ? ' monday' : ''}`} style={{ left: x(d.s), width: w }}>
+                        <button
+                          className="day-btn"
+                          title={`Apri ${fmtDay(d.d, 'EEEE d MMMM')}`}
+                          onClick={() => go(d.d, 'day')}
+                          onPointerDown={(e) => e.stopPropagation()}
+                        >
+                          {dayLabel(w, d.d)}
+                        </button>
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
             )}
             <div className="tl-row tl-hours" style={{ height: HEAD_H }}>
               <div className="tl-name" style={{ width: NAME_W }}>
-                {view === 'day' ? fmtDay(date, 'EEE d/M') : 'Ora'} <span className="muted small" style={{ fontWeight: 400 }}>{tz.split('/')[1]}</span>
+                {view === 'day' ? fmtDay(date, 'EEE d/M') : `Ore ${String(win.h0).padStart(2, '0')}–${String(win.h1).padStart(2, '0')}`}{' '}
+                <span className="muted small" style={{ fontWeight: 400 }}>{tz.split('/')[1]}</span>
               </div>
               <div className="tl-track" style={{ width: trackW }}>
                 {hourMarks.map((m) => (
@@ -747,9 +1018,9 @@ export default function Timeline(props: TimelineProps) {
             </div>
             {showMetrics && (
               <>
-                <MetricRow nameW={NAME_W} label="In servizio" values={metrics.total} max={metrics.max} slots={metrics.slots} slotMin={slotMin} x={x} total />
+                <MetricRow nameW={NAME_W} trackW={trackW} label="In servizio" values={metrics.total} max={metrics.max} slots={metrics.slots} slotMin={slotMin} x={x} total />
                 {view === 'day' && metrics.actRows.map(({ a, values }) => (
-                  <MetricRow nameW={NAME_W} key={a.id} label={a.name} color={a.color} values={values} max={metrics.max} slots={metrics.slots} slotMin={slotMin} x={x} />
+                  <MetricRow nameW={NAME_W} trackW={trackW} key={a.id} label={a.name} color={a.color} values={values} max={metrics.max} slots={metrics.slots} slotMin={slotMin} x={x} />
                 ))}
               </>
             )}
@@ -799,6 +1070,17 @@ export default function Timeline(props: TimelineProps) {
                     data-person={p.id}
                     style={{ width: trackW, backgroundImage: list.length ? gridBg : `${gridBg}, repeating-linear-gradient(135deg, transparent 0 6px, #f3f4f6 6px 7px)` }}
                   >
+                    {dayMarks.map((d) => {
+                      const id = marks[markKey(p.id, d.d)];
+                      const dt = id ? dtById.get(id) : null;
+                      if (!dt) return null;
+                      const w = x(d.e) - x(d.s);
+                      return (
+                        <div key={d.d} className="daymark" style={{ left: x(d.s), width: w, background: `${dt.color}55`, borderTopColor: dt.color }} title={`${dt.name} · ${fmtDay(d.d, 'EEE d MMM')}`}>
+                          {view === 'day' && <span>{dt.name}</span>}
+                        </div>
+                      );
+                    })}
                     {list.map((ev) => {
                       const a = actById.get(ev.activity_id);
                       const color = a?.color ?? '#999999';
@@ -815,9 +1097,9 @@ export default function Timeline(props: TimelineProps) {
                           style={{ left, width, background: color, color: textOn(color) }}
                           title={label}
                         >
-                          {canEdit && <span className="h l" data-h="l" />}
-                          {width > (view === 'week' && a?.kind !== 'absence' ? 140 : 44) && <span className="lbl">{a?.name}</span>}
-                          {canEdit && <span className="h r" data-h="r" />}
+                          {canEdit && width >= 24 && <span className="h l" data-h="l" />}
+                          {width > (view !== 'day' && a?.kind !== 'absence' ? 140 : 44) && <span className="lbl">{a?.name}</span>}
+                          {canEdit && width >= 24 && <span className="h r" data-h="r" />}
                         </div>
                       );
                     })}
@@ -825,7 +1107,7 @@ export default function Timeline(props: TimelineProps) {
                 </div>
               );
             })}
-            {now !== null && now > startMs && now < endMs && <div className="tl-now" style={{ left: NAME_W + x(now) }} />}
+            {now !== null && now > startMs && now < endMs && (!compact || (minuteOfDay(now, tz) >= win.h0 * 60 && minuteOfDay(now, tz) < win.h1 * 60)) && <div className="tl-now" style={{ left: NAME_W + x(now) }} />}
           </div>
         </div>
       </div>
@@ -839,6 +1121,71 @@ export default function Timeline(props: TimelineProps) {
         </div>
       )}
 
+      {dayMenu && (() => {
+        const keys = targetDays(dayMenu.person, dayMenu.day);
+        const cur = marks[markKey(dayMenu.person, dayMenu.day)] ?? null;
+        const pname = people.find((x) => x.id === dayMenu.person)?.full_name ?? '';
+        const [ds, de] = dayRange(dayMenu.day);
+        const dayEvs = evsRef.current.filter((e) => e.person_id === dayMenu.person && e.s < de && e.e > ds);
+        const close = () => setDayMenu(null);
+        return (
+          <div className="menu day-menu" style={{ left: Math.max(8, dayMenu.x), top: Math.max(8, dayMenu.y) }} onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
+            <div className="menu-h">
+              <b>{pname}</b>
+              <span className="muted small">{fmtDay(dayMenu.day, 'EEEE d MMM')}{keys.length > 1 ? ` · ${keys.length} giornate selezionate` : ''}</span>
+            </div>
+            {dayTypes.length > 0 && (
+              <>
+                <div className="menu-label">Tipo di giornata</div>
+                {dayTypes.map((d) => (
+                  <button key={d.id} onClick={() => { setDayType(keys, d.id); close(); }}>
+                    <span className="swatch" style={{ background: d.color }} />
+                    <span style={{ flex: 1 }}>{d.name}</span>
+                    {cur === d.id && <span aria-hidden="true">✓</span>}
+                  </button>
+                ))}
+                {cur && <button onClick={() => { setDayType(keys, null); close(); }} className="muted">Nessun tipo</button>}
+                <hr />
+              </>
+            )}
+            <button onClick={() => { addBreakAt(dayMenu.person, dayMenu.t); close(); }}>Aggiungi pausa qui ({fmtTime(Math.round(dayMenu.t / (5 * MIN)) * 5 * MIN, tz)})</button>
+            <button disabled={!dayEvs.length} onClick={() => { addAutoBreaks((e) => e.person_id === dayMenu.person && e.s < de && e.e > ds, 'in questa giornata'); close(); }}>Pause automatiche su questa giornata</button>
+            <hr />
+            {props.onTimeOff && <button onClick={() => { setDialog({ kind: 'absence', person: dayMenu.person, day: dayMenu.day }); close(); }}>Inserisci ferie, permesso o malattia…</button>}
+            {props.onSwap && <button disabled={!dayEvs.length} onClick={() => { setDialog({ kind: 'swap', person: dayMenu.person, day: dayMenu.day }); close(); }}>Scambia o sposta il turno…</button>}
+            <hr />
+            <button disabled={!dayEvs.length} onClick={() => { clipboard.current = dayEvs; say(`Copiata la giornata (${dayEvs.length} blocchi)`); close(); }}>Copia giornata</button>
+            <button onClick={() => { paste(dayMenu.person, ds + 12 * 60 * MIN); close(); }}>Incolla qui</button>
+            <button className="danger" disabled={!dayEvs.length} onClick={() => { removeIds(new Set(dayEvs.map((e) => e.id))); close(); }}>Svuota giornata</button>
+          </div>
+        );
+      })()}
+
+      {dialog?.kind === 'absence' && props.onTimeOff && (
+        <AbsenceDialog
+          person={people.find((x) => x.id === dialog.person)!}
+          day={dialog.day}
+          absences={usable.filter((a) => a.kind === 'absence')}
+          onClose={() => setDialog(null)}
+          onSubmit={(p) => runManager(() => props.onTimeOff!(p))}
+        />
+      )}
+      {dialog?.kind === 'swap' && props.onSwap && (
+        <SwapDialog
+          person={people.find((x) => x.id === dialog.person)!}
+          day={dialog.day}
+          people={people}
+          describe={(pid, d) => {
+            const [ds, de] = dayRange(d);
+            const l = evsRef.current.filter((e) => e.person_id === pid && e.s < de && e.e > ds && actById.get(e.activity_id)?.kind !== 'absence');
+            if (!l.length) return d >= rangeDate && d <= rangeEnd ? 'nessun turno' : null;
+            return `${fmtTime(Math.min(...l.map((e) => e.s)), tz)}–${fmtTime(Math.max(...l.map((e) => e.e)), tz)}`;
+          }}
+          onClose={() => setDialog(null)}
+          onSubmit={(p) => runManager(() => props.onSwap!(p))}
+        />
+      )}
+
       {canEdit && selEvents.length > 0 && !preview && (
         <Inspector
           events={selEvents}
@@ -848,6 +1195,14 @@ export default function Timeline(props: TimelineProps) {
           onClose={() => setSelected(new Set())}
           onChange={(fn) => updateSel(fn)}
           onDelete={() => removeIds(new Set(selected))}
+          dayTypes={dayTypes}
+          dayType={(() => {
+            const ks = new Set(selEvents.map((e) => marks[markKey(e.person_id, localDate(e.s, tz))] ?? ''));
+            return ks.size === 1 ? Array.from(ks)[0]! : 'mixed';
+          })()}
+          onDayType={(id) => setDayType(Array.from(new Set(selEvents.map((e) => markKey(e.person_id, localDate(e.s, tz))))), id)}
+          canBreak={!!breakAct}
+          onAddBreak={(t, minutes) => addBreakAt(selEvents[0]!.person_id, t, minutes)}
           onDuplicate={(days) => {
             const created = selEvents.map((e) => ({ ...shiftDays(e, days), id: uuid(), version: null }));
             commit([...evsRef.current, ...created]);
@@ -859,7 +1214,7 @@ export default function Timeline(props: TimelineProps) {
 
       <div className="tl-foot">
         <span className="muted small">{rows.length} di {people.length} persone</span>
-        {canEdit && <span className="kbd-help">Trascina per creare · Canc elimina · Ctrl+C/V · Ctrl+Z</span>}
+        {canEdit && <span className="kbd-help">Trascina per creare · Clic destro sulla giornata per assenze, scambi, pause · Ctrl+Z</span>}
         <span className="spacer" />
         {canEdit && (
           <>
@@ -906,6 +1261,7 @@ function unionMinutes(ranges: number[][]): number {
 /* ------------------------------------------------------------------ */
 function MetricRow(props: {
   nameW: number;
+  trackW: number;
   label: string; color?: string; values: number[]; max: number; slots: number[]; slotMin: number;
   x: (ms: number) => number; total?: boolean;
 }) {
@@ -916,7 +1272,7 @@ function MetricRow(props: {
         {props.color && <span className="swatch" style={{ background: props.color }} />}
         <span className="nm">{props.label}</span>
       </div>
-      <div className="tl-track" style={{ width: x(slots[slots.length - 1]! + slotMin * MIN) }}>
+      <div className="tl-track" style={{ width: props.trackW }}>
         {slots.map((t, i) => {
           const v = values[i]!;
           const r = v / max;
@@ -943,8 +1299,15 @@ function Inspector(props: {
   onChange: (fn: (e: Ev) => Ev) => void;
   onDelete: () => void;
   onDuplicate: (days: number) => void;
+  dayTypes: DayType[];
+  dayType: string; // '' = nessuno, 'mixed' = diversi
+  onDayType: (id: string | null) => void;
+  canBreak: boolean;
+  onAddBreak: (t: number, minutes: number) => void;
 }) {
   const { events, tz } = props;
+  const [brTime, setBrTime] = useState('');
+  const [brMin, setBrMin] = useState(15);
   const one = events.length === 1 ? events[0]! : null;
   const sameAct = events.every((e) => e.activity_id === events[0]!.activity_id) ? events[0]!.activity_id : '';
   const day = one ? localDate(one.s, tz) : '';
@@ -1011,7 +1374,48 @@ function Inspector(props: {
             <span>Nota</span>
             <input id="insp-note" className="input" value={one.note ?? ''} placeholder="Facoltativa" onChange={(e) => props.onChange((x) => ({ ...x, note: e.target.value || null }))} />
           </label>
+          {props.canBreak && one.e - one.s >= 60 * MIN && (
+            <div className="field">
+              <span>Aggiungi una pausa dentro questo blocco</span>
+              <div className="row" style={{ flexWrap: 'nowrap' }}>
+                <input
+                  id="insp-br-time"
+                  className="input"
+                  type="time"
+                  step={300}
+                  style={{ flex: 1 }}
+                  value={brTime || fmtTime(one.s + Math.min(120 * MIN, (one.e - one.s) / 2), tz)}
+                  onChange={(e) => setBrTime(e.target.value)}
+                />
+                <select id="insp-br-min" className="select" value={brMin} onChange={(e) => setBrMin(Number(e.target.value))} aria-label="Durata">
+                  {[5, 10, 15, 20, 30, 60].map((m) => <option key={m} value={m}>{m} min</option>)}
+                </select>
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    const t = brTime || fmtTime(one.s + Math.min(120 * MIN, (one.e - one.s) / 2), tz);
+                    let ms = localToUtc(day, t, tz);
+                    if (ms < one.s) ms = localToUtc(addDays(day, 1), t, tz);
+                    props.onAddBreak(ms, brMin);
+                    setBrTime('');
+                  }}
+                >
+                  + Pausa
+                </button>
+              </div>
+            </div>
+          )}
         </>
+      )}
+      {props.dayTypes.length > 0 && (
+        <label className="field">
+          <span>Tipo di giornata</span>
+          <select id="insp-daytype" className="select" value={props.dayType} onChange={(e) => e.target.value !== 'mixed' && props.onDayType(e.target.value || null)}>
+            {props.dayType === 'mixed' && <option value="mixed">Diversi</option>}
+            <option value="">Nessuno</option>
+            {props.dayTypes.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </select>
+        </label>
       )}
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <div className="row">

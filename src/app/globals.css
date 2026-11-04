@@ -177,3 +177,9 @@ table.table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
   .toast { animation: toast-in 0.18s ease-out; }
   @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 6px); } }
 }
+
+/* ---------- Dialoghi ---------- */
+.dlg-back { position: fixed; inset: 0; background: rgb(16 24 40 / 0.35); z-index: 60; display: grid; place-items: center; padding: 16px; }
+.dlg { background: #fff; border-radius: 12px; width: 100%; max-width: 480px; max-height: calc(100% - 32px); overflow: auto; padding: 18px; display: grid; gap: 14px; box-shadow: 0 20px 50px rgb(16 24 40 / 0.25); }
+.menu button:disabled { opacity: 0.45; cursor: not-allowed; background: none; }
+.menu button { align-items: center; gap: 8px; }

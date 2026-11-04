@@ -191,3 +191,23 @@ test('cognome da solo collegato al nome completo', () => {
   assert.equal(matchPerson('Bennincaso', null, people).candidates[0]?.id, '3');
   assert.equal(matchPerson('Rossi', null, people).status, 'fuzzy', 'cognome condiviso: da confermare');
 });
+
+test('pause automatiche', async () => {
+  const { autoBreaks, DEFAULT_RULES } = await import('../../src/lib/breaks');
+  const t = (h: number, m = 0) => Date.UTC(2026, 10, 10, h, m);
+  const blocks = [
+    { person_id: 'a', s: t(8), e: t(17), kind: 'work' as const },
+    { person_id: 'a', s: t(12), e: t(13), kind: 'break' as const },   // pranzo già presente
+    { person_id: 'b', s: t(9), e: t(13), kind: 'work' as const },     // 4h: niente pause
+    { person_id: 'c', s: t(9), e: t(18), kind: 'work' as const },
+    { person_id: 'c', s: t(10), e: t(10, 15), kind: 'break' as const }, // pausa vicina alla regola: non duplicare
+    { person_id: 'd', s: t(9), e: t(18), kind: 'work' as const },
+    { person_id: 'd', s: t(9), e: t(18), kind: 'absence' as const },  // in ferie
+  ];
+  const out = autoBreaks(blocks, DEFAULT_RULES);
+  const a = out.filter((x) => x.person_id === 'a').map((x) => new Date(x.s).toISOString().slice(11, 16));
+  assert.deepEqual(a, ['10:00', '14:45']);
+  assert.equal(out.filter((x) => x.person_id === 'b').length, 0);
+  assert.deepEqual(out.filter((x) => x.person_id === 'c').map((x) => new Date(x.s).toISOString().slice(11, 16)), ['15:45']);
+  assert.equal(out.filter((x) => x.person_id === 'd').length, 0);
+});

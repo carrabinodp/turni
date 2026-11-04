@@ -2,10 +2,12 @@
 
 Sito interno per pianificare turni e attività del team, in stile "staffing timeline".
 
-- **Timeline** giorno/settimana: blocchi colorati per attività, trascina per spostare, tira i bordi per allungare/accorciare, disegna nuovi blocchi, copia/incolla, annulla, salva in blocco.
+- **Timeline** giorno, settimana o periodo personalizzato (fino a 62 giorni, solo ore lavorate): blocchi colorati per attività, trascina per spostare, tira i bordi per allungare/accorciare, disegna nuovi blocchi, copia/incolla, annulla, salva in blocco.
 - **Import Excel**: griglia giorni × persone (come il file turni attuale, un foglio per mese), griglia persone × giorni o elenco di blocchi (anche export di Assembled). Riconosce orari, colori delle celle con la legenda del file (Ferie, Rec, Reclami, Smart…), ignora righe di totali e colonne di statistiche, e collega ogni colonna alla persona anche col solo cognome.
 - **Login con Google aziendale**: chi entra con l'email del dominio ottiene il profilo in automatico; se era già nel file importato, viene collegato ai suoi turni.
-- **Scambi, cessioni in bacheca, ferie e permessi** con approvazione di un manager (basta uno dei tre).
+- **Scambi, cessioni in bacheca, ferie e permessi** con approvazione di un manager (basta uno dei tre). Il manager può anche inserirli direttamente col clic destro sulla giornata.
+- **Tipo di giornata** (Ufficio, Smart working, …) con colore di sfondo, dalla timeline o dai colori dell’Excel. I colori abbinati all’import vengono ricordati.
+- **Pause**: inserimento rapido e regole automatiche configurabili.
 - **Controllo del riposo minimo** (11 h, configurabile) sul server: uno scambio che lo viola non passa.
 - **Bozza / pubblicata** per settimana: i dipendenti vedono solo le settimane pubblicate.
 - **Notifiche** in-app, email e push (anche su iPhone con il sito aggiunto alla schermata Home).
@@ -19,7 +21,7 @@ Stack: Next.js 14 · Supabase (Postgres, Auth, RLS) · Vercel.
 
 ### 1. Supabase
 1. Crea un progetto su <https://supabase.com> scegliendo la regione **Central EU (Frankfurt)**.
-2. **SQL Editor** → incolla ed esegui `supabase/migrations/0001_init.sql`.
+2. **SQL Editor** → incolla ed esegui `supabase/migrations/0001_init.sql`, poi `0002_giornate_pause.sql` (in quest'ordine, una volta sola ciascuno).
 3. Apri `supabase/setup.sql`, metti il tuo dominio e la tua email, ed eseguilo.
 4. **Project Settings → API**: copia `Project URL`, `anon key` e `service_role key`.
 

@@ -12,6 +12,7 @@ export interface DayCard {
   absence: string | null;
   blocks: { activity_id: string; s: number; e: number; color: string; name: string }[];
   hasShift: boolean;
+  dayType: { name: string; color: string } | null;
   pending: boolean;
   canAct: boolean;
 }
@@ -62,6 +63,9 @@ export default function MyShifts(props: {
                 <div>
                   <b style={{ textTransform: 'capitalize' }}>{fmtDay(d.day, 'EEEE d MMM')}</b>
                   {d.day === today && <span className="pill pill-info" style={{ marginLeft: 8 }}>Oggi</span>}
+                  {d.dayType && (
+                    <span className="pill" style={{ marginLeft: 8, background: d.dayType.color, color: '#1d2433' }}>{d.dayType.name}</span>
+                  )}
                 </div>
                 <div className="tabnum" style={{ fontWeight: 600 }}>
                   {d.absence && !d.hasShift ? <span className="pill">{d.absence}</span> : d.text ?? <span className="muted" style={{ fontWeight: 400 }}>Riposo</span>}
@@ -117,8 +121,6 @@ export default function MyShifts(props: {
         .day-h{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
         .mini{position:relative;height:16px;border-radius:4px;background:var(--hover);overflow:hidden}
         .mini span{position:absolute;top:0;bottom:0}
-        .dlg-back{position:fixed;inset:0;background:rgb(16 24 40 / .35);z-index:60;display:grid;place-items:center;padding:16px}
-        .dlg{background:#fff;border-radius:12px;width:100%;max-width:480px;max-height:calc(100% - 32px);overflow:auto;padding:18px;display:grid;gap:14px}
         .opts{display:grid;gap:6px;max-height:260px;overflow:auto}
         .opt{display:flex;justify-content:space-between;gap:10px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;cursor:pointer;background:#fff;font:inherit;text-align:left}
         .opt[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft)}

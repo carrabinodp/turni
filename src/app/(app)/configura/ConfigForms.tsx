@@ -1,15 +1,16 @@
 'use client';
 import { useState } from 'react';
 import { useAction } from '@/components/ui';
-import { KIND_LABEL, type Activity, type ActivityKind, type Settings } from '@/lib/types';
-import { saveActivity, saveSettings, type ActivityInput } from './actions';
+import { KIND_LABEL, type Activity, type ActivityKind, type DayType, type Settings } from '@/lib/types';
+import { DEFAULT_RULES } from '@/lib/breaks';
+import { saveActivity, saveBreakRules, saveDayType, saveSettings, type ActivityInput, type BreakRuleInput, type DayTypeInput } from './actions';
 
 const toInput = (a: Activity): ActivityInput => ({
   id: a.id, name: a.name, color: a.color, kind: a.kind, aliases: a.aliases.join(', '),
   requestable: a.requestable, archived: a.archived, sort_order: a.sort_order,
 });
 
-export default function ConfigForms({ activities, settings, isAdmin }: { activities: Activity[]; settings: Settings; isAdmin: boolean }) {
+export default function ConfigForms({ activities, dayTypes, settings, isAdmin }: { activities: Activity[]; dayTypes: DayType[]; settings: Settings; isAdmin: boolean }) {
   const maxOrder = Math.max(0, ...activities.map((a) => a.sort_order));
   return (
     <>
@@ -28,6 +29,22 @@ export default function ConfigForms({ activities, settings, isAdmin }: { activit
           </table>
         </div>
       </section>
+      <section className="card">
+        <div className="card-head">
+          <h2>Tipi di giornata</h2>
+          <span className="small muted">Colorano lo sfondo della giornata (es. ufficio o smart working). Si assegnano col clic destro in timeline o dai colori dell’Excel.</span>
+        </div>
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr><th>Colore</th><th>Nome</th><th>Nomi alternativi (per l’import)</th><th>Ordine</th><th>Archiviato</th><th /></tr></thead>
+            <tbody>
+              {dayTypes.map((d) => <DayTypeRow key={d.id} initial={{ id: d.id, name: d.name, color: d.color, aliases: d.aliases.join(', '), archived: d.archived, sort_order: d.sort_order }} />)}
+              <DayTypeRow key={`new-${dayTypes.length}`} initial={{ name: '', color: '#ffe0b2', aliases: '', archived: false, sort_order: Math.max(0, ...dayTypes.map((d) => d.sort_order)) + 10 }} />
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <BreakRulesForm settings={settings} activities={activities} isAdmin={isAdmin} />
       <SettingsForm settings={settings} isAdmin={isAdmin} />
     </>
   );
@@ -98,6 +115,76 @@ function SettingsForm({ settings, isAdmin }: { settings: Settings; isAdmin: bool
             Il riposo minimo (11 ore per il D.Lgs. 66/2003) blocca gli scambi che lo violano. Due blocchi separati da meno della pausa indicata contano come un unico turno spezzato.
           </p>
           {isAdmin && <div><button className="btn btn-primary">Salva impostazioni</button></div>}
+        </fieldset>
+      </form>
+    </section>
+  );
+}
+
+function DayTypeRow({ initial }: { initial: DayTypeInput }) {
+  const [d, setD] = useState(initial);
+  const { run, busy } = useAction();
+  const dirty = JSON.stringify(d) !== JSON.stringify(initial);
+  const isNew = !initial.id;
+  const k = initial.id ?? 'new';
+  return (
+    <tr style={d.archived ? { opacity: 0.55 } : undefined}>
+      <td><input id={`d-color-${k}`} type="color" value={d.color} onChange={(e) => setD({ ...d, color: e.target.value })} style={{ width: 36, height: 30, border: 0, background: 'none', padding: 0 }} aria-label="Colore" /></td>
+      <td><input id={`d-name-${k}`} className="input" value={d.name} placeholder={isNew ? 'Nuovo tipo…' : ''} onChange={(e) => setD({ ...d, name: e.target.value })} style={{ minWidth: 140 }} /></td>
+      <td><input id={`d-alias-${k}`} className="input" value={d.aliases} placeholder="smart, sw" onChange={(e) => setD({ ...d, aliases: e.target.value })} style={{ minWidth: 150 }} /></td>
+      <td><input id={`d-order-${k}`} className="input" type="number" value={d.sort_order} onChange={(e) => setD({ ...d, sort_order: Number(e.target.value) })} style={{ width: 70 }} /></td>
+      <td style={{ textAlign: 'center' }}>{!isNew && <input id={`d-arch-${k}`} type="checkbox" checked={d.archived} onChange={(e) => setD({ ...d, archived: e.target.checked })} />}</td>
+      <td>
+        <button className={`btn btn-sm${dirty ? ' btn-primary' : ''}`} disabled={!dirty || busy || !d.name.trim()} onClick={() => run(() => saveDayType(d), () => isNew && setD(initial))}>
+          {isNew ? 'Aggiungi' : 'Salva'}
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function BreakRulesForm({ settings, activities, isAdmin }: { settings: Settings; activities: Activity[]; isAdmin: boolean }) {
+  const [rules, setRules] = useState<BreakRuleInput[]>(settings.break_rules?.length ? settings.break_rules : DEFAULT_RULES);
+  const breaks = activities.filter((a) => a.kind === 'break' && !a.archived);
+  const [act, setAct] = useState(settings.break_activity_id ?? breaks[0]?.id ?? '');
+  const { run, busy } = useAction();
+  const set = (i: number, patch: Partial<BreakRuleInput>) => setRules(rules.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Pause automatiche</h2>
+        <span className="small muted">Usate dal pulsante “Pause automatiche” in timeline e dall’import. Una pausa non viene aggiunta se ce n’è già una vicina.</span>
+      </div>
+      <form className="card-body" onSubmit={(e) => { e.preventDefault(); run(() => saveBreakRules(rules, act || null)); }}>
+        <fieldset disabled={!isAdmin || busy} style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 10 }}>
+          <label className="field" style={{ maxWidth: 260 }}>
+            <span>Attività usata per le pause</span>
+            <select id="br-act" className="select" value={act} onChange={(e) => setAct(e.target.value)}>
+              {!breaks.length && <option value="">Crea prima un’attività di tipo Pausa</option>}
+              {breaks.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </label>
+          {rules.map((r, i) => (
+            <div key={i} className="row" style={{ alignItems: 'center' }}>
+              <span>Nei turni di almeno</span>
+              <input id={`br-min-${i}`} className="input" type="number" min={0} max={24} step={0.5} value={r.min_shift_hours} onChange={(e) => set(i, { min_shift_hours: Number(e.target.value) })} style={{ width: 70 }} />
+              <span>ore, una pausa di</span>
+              <input id={`br-dur-${i}`} className="input" type="number" min={1} max={120} value={r.duration_minutes} onChange={(e) => set(i, { duration_minutes: Number(e.target.value) })} style={{ width: 70 }} />
+              <span>min</span>
+              <input id={`br-off-${i}`} className="input" type="number" min={0} max={12} step={0.25} value={r.offset_minutes / 60} onChange={(e) => set(i, { offset_minutes: Math.round(Number(e.target.value) * 60) })} style={{ width: 70 }} />
+              <select id={`br-from-${i}`} className="select" value={r.from} onChange={(e) => set(i, { from: e.target.value as 'start' | 'end' })}>
+                <option value="start">ore dopo l’inizio</option>
+                <option value="end">ore prima della fine</option>
+              </select>
+              <button type="button" className="btn btn-sm btn-ghost btn-danger" onClick={() => setRules(rules.filter((_, j) => j !== i))}>Togli</button>
+            </div>
+          ))}
+          {isAdmin && (
+            <div className="row">
+              <button type="button" className="btn btn-sm" onClick={() => setRules([...rules, { min_shift_hours: 6, from: 'start', offset_minutes: 120, duration_minutes: 15 }])}>+ Aggiungi regola</button>
+              <button className="btn btn-primary">Salva regole</button>
+            </div>
+          )}
         </fieldset>
       </form>
     </section>

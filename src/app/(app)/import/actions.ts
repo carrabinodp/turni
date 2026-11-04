@@ -10,9 +10,27 @@ export async function importAction(p: ImportPayload): Promise<ImportResult> {
   if (!isManager) return { ok: false, error: 'Solo i manager possono importare' };
   if (p.rows.length > 20000) return { ok: false, error: 'File troppo grande: massimo 20.000 blocchi per volta' };
 
-  const { publish, ...payload } = p;
+  const { publish, color_map, ...payload } = p;
   const { data, error } = await supabase.rpc('import_schedule', { payload });
   if (error) return { ok: false, error: error.message };
+
+  // ricorda gli abbinamenti dei colori per i prossimi import
+  if (color_map.length) {
+    const [{ data: acts }, { data: dts }] = await Promise.all([
+      supabase.from('activity_types').select('id, name'),
+      supabase.from('day_types').select('id, name'),
+    ]);
+    const byName = (list: { id: string; name: string }[] | null, n?: string) =>
+      n ? list?.find((x) => x.name.trim().toLowerCase() === n.trim().toLowerCase())?.id ?? null : null;
+    const rows = color_map
+      .map((c) => {
+        const activity_id = c.target === 'activity' ? c.activity_id ?? byName(acts, c.activity_name) : null;
+        const day_type_id = c.target === 'day_type' ? c.day_type_id ?? byName(dts, c.day_type_name) : null;
+        return { fill: c.fill, target: c.target, activity_id, day_type_id, label: c.label, updated_at: new Date().toISOString() };
+      })
+      .filter((r) => (r.target !== 'activity' || r.activity_id) && (r.target !== 'day_type' || r.day_type_id));
+    await supabase.from('import_color_map').upsert(rows, { onConflict: 'fill' });
+  }
 
   const published: string[] = [];
   if (publish) {
@@ -31,5 +49,5 @@ export async function importAction(p: ImportPayload): Promise<ImportResult> {
     });
   }
   revalidatePath('/timeline');
-  return { ok: true, inserted: data.inserted, deleted: data.deleted, people_created: data.people_created, published };
+  return { ok: true, inserted: data.inserted, deleted: data.deleted, people_created: data.people_created, marks: data.marks ?? 0, published };
 }

@@ -18,6 +18,8 @@ export interface Settings {
   min_rest_hours: number;
   split_gap_hours: number;
   snap_minutes: number;
+  break_rules?: { min_shift_hours: number; from: 'start' | 'end'; offset_minutes: number; duration_minutes: number }[];
+  break_activity_id?: string | null;
 }
 
 export interface Person {
@@ -42,6 +44,21 @@ export interface Activity {
   requestable: boolean;
   sort_order: number;
   archived: boolean;
+}
+
+export interface DayType {
+  id: string;
+  name: string;
+  color: string;
+  aliases: string[];
+  sort_order: number;
+  archived: boolean;
+}
+
+export interface DayMark {
+  person_id: string;
+  day: string;
+  day_type_id: string;
 }
 
 export interface EventRow {

@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react';
 import Sidebar from '@/components/Sidebar';
 import Timeline from '@/components/timeline/Timeline';
 import Importer from '@/components/import/Importer';
-import type { Activity, EventRow } from '@/lib/types';
+import type { Activity, DayMark, DayType, EventRow } from '@/lib/types';
 import { localToUtc, todayIn, weekStart, addDays } from '@/lib/time';
 
 const TZ = 'Europe/Rome';
@@ -13,6 +13,11 @@ const ACTS: Activity[] = [
   A('form', 'Formazione', '#c58b2b', 'work'), A('riun', 'Riunione', '#a33a5a', 'work'),
   A('pausa', 'Pausa', '#a9d3ea', 'break'), A('pranzo', 'Pranzo', '#f6e7a6', 'break'),
   A('ferie', 'Ferie', '#bdb6d8', 'absence', true), A('mal', 'Malattia', '#f48ca0', 'absence'),
+];
+const DT: DayType[] = [
+  { id: 'uff', name: 'Ufficio', color: '#dbe7ff', aliases: [], sort_order: 10, archived: false },
+  { id: 'sw', name: 'Smart working', color: '#fff27a', aliases: [], sort_order: 20, archived: false },
+  { id: 'ver', name: 'Da verificare', color: '#b7dee8', aliases: [], sort_order: 30, archived: false },
 ];
 const NAMES = ['Claudia Borra', 'Andrea Pettineo', 'Davide Mascitelli', 'Francesca Gennari', 'Gabriella Martorana', 'Francesca Ceraolo', 'Luca Neri', 'Sara Colombo', 'Paolo Bruno', 'Elena Ricci', 'Marco Bianchi', 'Giulia Rossi', 'Simone Fontana', 'Martina Costa'];
 const PEOPLE = NAMES.map((n, i) => ({ id: `p${i}`, full_name: n, contract: i % 5 === 3 ? 'part time' : 'full time', user_id: i === 12 ? null : `u${i}`, email: null, aliases: [] as string[] }));
@@ -46,11 +51,22 @@ function buildEvents(dates: string[]): EventRow[] {
 export default function DevPreview({ screen }: { screen: string }) {
   const today = todayIn(TZ);
   const [date, setDate] = useState(today);
-  const [view, setView] = useState<'day' | 'week'>(screen === 'week' ? 'week' : 'day');
-  const events = useMemo(() => {
-    const ws = weekStart(date);
-    return buildEvents(Array.from({ length: 7 }, (_, i) => addDays(ws, i)));
-  }, [date]);
+  const [view, setView] = useState<'day' | 'week' | 'custom'>(screen === 'week' ? 'week' : screen === 'custom' ? 'custom' : 'day');
+  const [to, setTo] = useState<string | undefined>(screen === 'custom' ? addDays(weekStart(today), 27) : undefined);
+  const from = view === 'custom' ? date : weekStart(date);
+  const n = view === 'custom' && to ? Math.round((Date.parse(to) - Date.parse(date)) / 86400000) + 1 : 7;
+  const events = useMemo(() => buildEvents(Array.from({ length: n }, (_, i) => addDays(from, i))), [from, n]);
+  const marks = useMemo<DayMark[]>(() => {
+    const out: DayMark[] = [];
+    for (let i = 0; i < n; i++) {
+      const d = addDays(from, i);
+      PEOPLE.forEach((p, k) => {
+        if (k === 0) return;
+        out.push({ person_id: p.id, day: d, day_type_id: (k + i) % 4 === 0 ? 'sw' : 'uff' });
+      });
+    }
+    return out;
+  }, [from, n]);
 
   return (
     <div className="shell">
@@ -59,7 +75,16 @@ export default function DevPreview({ screen }: { screen: string }) {
         {screen === 'import' ? (
           <div className="page" style={{ maxWidth: 1100 }}>
             <h1>Importa Excel</h1>
-            <Importer people={PEOPLE} activities={ACTS} tz={TZ} onImport={async (p) => ({ ok: true, inserted: p.rows.length, deleted: 0, people_created: p.people_create.length, published: [] })} />
+            <Importer
+              people={PEOPLE}
+              activities={ACTS}
+              dayTypes={DT}
+              savedColors={[{ fill: 'BF4F14', target: 'activity', activity_id: 'riun', day_type_id: null }]}
+              breakRules={[]}
+              breakActivityId="pausa"
+              tz={TZ}
+              onImport={async (p) => ({ ok: true, inserted: p.rows.length, deleted: 0, people_created: p.people_create.length, marks: p.marks.length, published: [] })}
+            />
           </div>
         ) : (
           <Timeline
@@ -69,12 +94,17 @@ export default function DevPreview({ screen }: { screen: string }) {
             people={PEOPLE}
             activities={ACTS}
             events={events}
-            weekPublished={screen !== 'week'}
+            to={view === 'custom' ? to : undefined}
+            dayTypes={DT}
+            marks={marks}
+            publishedWeeks={screen === 'week' ? [] : [weekStart(date)]}
             canEdit
             meId="p11"
             snapMinutes={15}
-            serverKey={`${view}${date}`}
-            navigate={(d, v) => { setDate(d); setView(v); }}
+            serverKey={`${view}${date}${to}`}
+            navigate={(d, v, t) => { setDate(d); setView(v); setTo(t); }}
+            onTimeOff={async () => ({ ok: true, message: 'Assenza inserita (anteprima)' })}
+            onSwap={async (p) => (p.force ? { ok: true, message: 'Applicato (anteprima)' } : { ok: false, error: 'Marco: solo 10h00 di riposo prima del turno di 11/11 alle 08:00 (minimo 11 h)' })}
             onSave={async (p) => ({ ok: true, message: `Salvate ${p.upserts.length + p.deletes.length} modifiche (anteprima)` })}
             onPublish={async () => ({ ok: true })}
             onCopyWeek={async () => ({ ok: true })}

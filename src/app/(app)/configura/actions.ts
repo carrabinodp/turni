@@ -66,3 +66,55 @@ export async function saveSettings(s: {
   revalidatePath('/', 'layout');
   return { ok: true, message: 'Impostazioni salvate' };
 }
+
+export interface DayTypeInput {
+  id?: string;
+  name: string;
+  color: string;
+  aliases: string;
+  archived: boolean;
+  sort_order: number;
+}
+
+export async function saveDayType(d: DayTypeInput): Promise<R> {
+  const { supabase } = await requireManager();
+  const row = {
+    name: d.name.trim(),
+    color: d.color,
+    aliases: d.aliases.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
+    archived: d.archived,
+    sort_order: d.sort_order,
+  };
+  if (!row.name) return { ok: false, error: 'Il nome è obbligatorio' };
+  const { error } = d.id
+    ? await supabase.from('day_types').update(row).eq('id', d.id)
+    : await supabase.from('day_types').insert(row);
+  if (error) return { ok: false, error: error.code === '23505' ? 'Esiste già un tipo con questo nome' : error.message };
+  revalidatePath('/configura');
+  revalidatePath('/timeline');
+  return { ok: true, message: 'Tipo di giornata salvato' };
+}
+
+export interface BreakRuleInput {
+  min_shift_hours: number;
+  from: 'start' | 'end';
+  offset_minutes: number;
+  duration_minutes: number;
+}
+
+export async function saveBreakRules(rules: BreakRuleInput[], activityId: string | null): Promise<R> {
+  const { supabase, isAdmin } = await requireManager();
+  if (!isAdmin) return { ok: false, error: 'Solo l’amministratore può cambiare le regole' };
+  const clean = rules
+    .filter((r) => r.duration_minutes > 0)
+    .map((r) => ({
+      min_shift_hours: Math.max(0, Math.min(24, Number(r.min_shift_hours))),
+      from: r.from === 'end' ? 'end' : 'start',
+      offset_minutes: Math.max(0, Math.min(720, Math.round(Number(r.offset_minutes)))),
+      duration_minutes: Math.max(1, Math.min(120, Math.round(Number(r.duration_minutes)))),
+    }));
+  const { error } = await supabase.from('settings').update({ break_rules: clean, break_activity_id: activityId }).eq('id', 1);
+  if (error) return { ok: false, error: error.message };
+  revalidatePath('/', 'layout');
+  return { ok: true, message: 'Regole delle pause salvate' };
+}

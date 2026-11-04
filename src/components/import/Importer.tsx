@@ -1,7 +1,8 @@
 'use client';
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
-import type { Activity, ActivityKind } from '@/lib/types';
+import type { Activity, ActivityKind, DayType } from '@/lib/types';
+import { autoBreaks, DEFAULT_RULES, type Block, type BreakRule } from '@/lib/breaks';
 import { KIND_LABEL } from '@/lib/types';
 import {
   columnLabels, serialToDate, detect, detectGrid, detectGridCols, detectLegend, detectList, parse, plain,
@@ -21,11 +22,15 @@ export interface ImportPayload {
   people_alias: { person_id: string; alias: string }[];
   activity_create: { key: string; name: string; kind: ActivityKind; color: string }[];
   activity_alias: { activity_id: string; alias: string }[];
+  day_type_create: { key: string; name: string; color: string }[];
+  marks: { person_id?: string; person_key?: string; day: string; day_type_id?: string; day_type_key?: string }[];
+  /** abbinamenti colore → cosa, da ricordare per i prossimi import */
+  color_map: { fill: string; target: 'activity' | 'day_type' | 'ignore' | 'skip'; activity_id?: string; activity_name?: string; day_type_id?: string; day_type_name?: string; label: string | null }[];
   rows: { person_id?: string; person_key?: string; activity_id?: string; activity_key?: string; starts_at: string; ends_at: string; note?: string | null }[];
 }
 
 export type ImportResult =
-  | { ok: true; inserted: number; deleted: number; people_created: number; published: string[] }
+  | { ok: true; inserted: number; deleted: number; people_created: number; marks: number; published: string[] }
   | { ok: false; error: string };
 
 const NEW_COLORS = ['#2e6e9e', '#7b5ea7', '#3a8a6e', '#b5642a', '#a33a5a', '#5d7686', '#8a7a2e'];
@@ -36,14 +41,34 @@ const IGNORE_WORDS = /^(lavorativ|normale|da verificare|verificare|confermare)/;
 
 type PersonChoice = { kind: 'existing'; id: string } | { kind: 'new' } | { kind: 'skip' };
 type ActChoice = { kind: 'existing'; id: string } | { kind: 'new'; actKind: ActivityKind } | { kind: 'skip' };
-type ColorChoice = { kind: 'existing'; id: string } | { kind: 'new'; name: string; actKind: ActivityKind } | { kind: 'ignore' } | { kind: 'skip' };
+type ColorChoice =
+  | { kind: 'existing'; id: string }
+  | { kind: 'new'; name: string; actKind: ActivityKind }
+  | { kind: 'dayType'; id: string }
+  | { kind: 'newDayType'; name: string }
+  | { kind: 'ignore' }
+  | { kind: 'skip' };
+const SMART_WORDS = /^(smart|sw\b|remot|casa|telelavoro)/;
+
+export interface SavedColor {
+  fill: string;
+  target: 'activity' | 'day_type' | 'ignore' | 'skip';
+  activity_id: string | null;
+  day_type_id: string | null;
+}
 
 export default function Importer(props: {
   people: PersonLite[];
   activities: Activity[];
+  dayTypes: DayType[];
+  savedColors: SavedColor[];
+  breakRules: BreakRule[];
+  breakActivityId: string | null;
   tz: string;
   onImport: (p: ImportPayload) => Promise<ImportResult>;
 }) {
+  const liveDayTypes = props.dayTypes.filter((d) => !d.archived);
+  const saved = new Map(props.savedColors.map((c) => [c.fill, c]));
   const { tz } = props;
   const today = todayIn(tz);
   const [fileName, setFileName] = useState('');
@@ -58,6 +83,7 @@ export default function Importer(props: {
   const [defaultAct, setDefaultAct] = useState(props.activities.find((a) => a.kind === 'work' && !a.archived)?.id ?? '');
   const [replace, setReplace] = useState(true);
   const [publish, setPublish] = useState(false);
+  const [withBreaks, setWithBreaks] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<(ImportResult & { ok: true }) | null>(null);
@@ -126,21 +152,38 @@ export default function Importer(props: {
     return Array.from(m.values()).sort((a, b) => b.count - a.count).map((c) => ({ ...c, legend: legend.get(c.fill) ?? null }));
   }, [parsed, legend, tz]);
 
+  const matchDayType = (label: string) => {
+    const t = plain(label);
+    return liveDayTypes.find((d) => plain(d.name) === t || d.aliases.some((a) => plain(a) === t)) ?? null;
+  };
   const colorOf = (c: (typeof colors)[number]): ColorChoice => {
     if (colorChoice[c.fill]) return colorChoice[c.fill]!;
+    // scelta fatta in un import precedente
+    const sv = saved.get(c.fill);
+    if (sv) {
+      if (sv.target === 'activity' && sv.activity_id && props.activities.some((a) => a.id === sv.activity_id)) return { kind: 'existing', id: sv.activity_id };
+      if (sv.target === 'day_type' && sv.day_type_id && liveDayTypes.some((d) => d.id === sv.day_type_id)) return { kind: 'dayType', id: sv.day_type_id };
+      if (sv.target === 'ignore' || sv.target === 'skip') return { kind: sv.target };
+    }
     if (!c.legend) return { kind: 'ignore' };
     const l = plain(c.legend);
     if (SKIP_WORDS.test(l)) return { kind: 'skip' };
+    const dt = matchDayType(c.legend);
+    if (dt) return { kind: 'dayType', id: dt.id };
+    if (SMART_WORDS.test(l)) {
+      const sw = liveDayTypes.find((d) => SMART_WORDS.test(plain(d.name)));
+      return sw ? { kind: 'dayType', id: sw.id } : { kind: 'newDayType', name: 'Smart working' };
+    }
     if (IGNORE_WORDS.test(l)) return { kind: 'ignore' };
     const a = matchActivity(c.legend, props.activities);
     if (a) return { kind: 'existing', id: a.id };
     return { kind: 'new', name: c.legend.charAt(0).toUpperCase() + c.legend.slice(1), actKind: ABSENCE_WORDS.test(l) ? 'absence' : 'work' };
   };
   const colorMap = new Map(colors.map((c) => [c.fill, colorOf(c)]));
-  /** il colore decide l'attività del blocco? */
+  /** il colore decide l'attività del blocco? (i tipi di giornata no: cambiano solo lo sfondo del giorno) */
   const byColor = (it: ParsedItem) => {
     const c = it.fill ? colorMap.get(it.fill) : undefined;
-    return c && c.kind !== 'ignore' ? c : null;
+    return c && (c.kind === 'existing' || c.kind === 'new' || c.kind === 'skip') ? c : null;
   };
 
   const persons = useMemo(() => {
@@ -191,6 +234,7 @@ export default function Importer(props: {
     const pay: ImportPayload = {
       replace, publish, from_date: range.from, to_date: range.to, file_name: fileName,
       people_create: [], people_alias: [], activity_create: [], activity_alias: [], rows: [],
+      day_type_create: [], marks: [], color_map: [],
     };
     const pMap = new Map<string, { person_id?: string; person_key?: string } | null>();
     for (const p of persons) {
@@ -223,11 +267,19 @@ export default function Importer(props: {
       }
     });
     const cMap = new Map<string, { activity_id?: string; activity_key?: string } | null>();
-    colors.forEach((c, i) => {
+    const dMap = new Map<string, { day_type_id?: string; day_type_key?: string }>();
+    colors.forEach((c) => {
       const ch = colorOf(c);
-      if (ch.kind === 'skip') cMap.set(c.fill, null);
-      else if (ch.kind === 'existing') cMap.set(c.fill, { activity_id: ch.id });
-      else if (ch.kind === 'new') {
+      const label = c.legend;
+      if (ch.kind === 'skip') {
+        cMap.set(c.fill, null);
+        pay.color_map.push({ fill: c.fill, target: 'skip', label });
+      } else if (ch.kind === 'ignore') {
+        pay.color_map.push({ fill: c.fill, target: 'ignore', label });
+      } else if (ch.kind === 'existing') {
+        cMap.set(c.fill, { activity_id: ch.id });
+        pay.color_map.push({ fill: c.fill, target: 'activity', activity_id: ch.id, label });
+      } else if (ch.kind === 'new') {
         const key = `c:${c.fill}`;
         const existing = pay.activity_create.find((x) => plain(x.name) === plain(ch.name));
         if (existing) cMap.set(c.fill, { activity_key: existing.key });
@@ -235,18 +287,52 @@ export default function Importer(props: {
           pay.activity_create.push({ key, name: ch.name, kind: ch.actKind, color: `#${c.fill.toLowerCase()}` });
           cMap.set(c.fill, { activity_key: key });
         }
-        void i;
+        pay.color_map.push({ fill: c.fill, target: 'activity', activity_name: ch.name, label });
+      } else if (ch.kind === 'dayType') {
+        dMap.set(c.fill, { day_type_id: ch.id });
+        pay.color_map.push({ fill: c.fill, target: 'day_type', day_type_id: ch.id, label });
+      } else {
+        const key = `d:${c.fill}`;
+        const existing = pay.day_type_create.find((x) => plain(x.name) === plain(ch.name));
+        if (existing) dMap.set(c.fill, { day_type_key: existing.key });
+        else {
+          pay.day_type_create.push({ key, name: ch.name, color: `#${c.fill.toLowerCase()}` });
+          dMap.set(c.fill, { day_type_key: key });
+        }
+        pay.color_map.push({ fill: c.fill, target: 'day_type', day_type_name: ch.name, label });
       }
     });
     if (!defaultAct && unlabeled) {
       setBusy(false);
       return setError('Scegli l’attività per i turni senza etichetta');
     }
+    const kindOfRow = (a: { activity_id?: string; activity_key?: string }): ActivityKind =>
+      a.activity_id
+        ? props.activities.find((x) => x.id === a.activity_id)?.kind ?? 'work'
+        : pay.activity_create.find((x) => x.key === a.activity_key)?.kind ?? 'work';
+    const blocks: (Block & { p: { person_id?: string; person_key?: string } })[] = [];
+    const markSeen = new Set<string>();
     for (const it of parsed.items) {
       const p = pMap.get(it.key);
       const a = it.fill && cMap.has(it.fill) ? cMap.get(it.fill) : it.activity ? aMap.get(plain(it.activity)) : { activity_id: defaultAct };
       if (!p || !a) continue;
       pay.rows.push({ ...p, ...a, starts_at: new Date(it.s).toISOString(), ends_at: new Date(it.e).toISOString(), note: it.note });
+      blocks.push({ person_id: p.person_id ?? `k:${p.person_key}`, s: it.s, e: it.e, kind: kindOfRow(a), p });
+      const dt = it.fill ? dMap.get(it.fill) : undefined;
+      if (dt) {
+        const day = localDate(it.s, tz);
+        const k = `${p.person_id ?? p.person_key}|${day}`;
+        if (!markSeen.has(k)) {
+          markSeen.add(k);
+          pay.marks.push({ ...p, day, ...dt });
+        }
+      }
+    }
+    if (withBreaks && props.breakActivityId) {
+      const pOf = new Map(blocks.map((b) => [b.person_id, b.p]));
+      for (const br of autoBreaks(blocks, props.breakRules.length ? props.breakRules : DEFAULT_RULES)) {
+        pay.rows.push({ ...pOf.get(br.person_id)!, activity_id: props.breakActivityId, starts_at: new Date(br.s).toISOString(), ends_at: new Date(br.e).toISOString() });
+      }
     }
     if (!pay.rows.length) {
       setBusy(false);
@@ -266,6 +352,7 @@ export default function Importer(props: {
           <div className="alert alert-ok">
             Import completato: {done.inserted} blocchi inseriti{done.deleted ? `, ${done.deleted} sostituiti` : ''}
             {done.people_created ? `, ${done.people_created} nuove persone in attesa di registrazione` : ''}.
+            {done.marks ? ` ${done.marks} giornate segnate (es. smart working).` : ''}
             {done.published.length ? ` Settimane pubblicate: ${done.published.map((w) => fmtDay(w, 'd MMM')).join(', ')}.` : ' Le settimane restano in bozza finché non le pubblichi.'}
           </div>
           <div className="row">
@@ -406,12 +493,17 @@ export default function Importer(props: {
                     <tbody>
                       {colors.map((c) => {
                         const ch = colorOf(c);
-                        const val = ch.kind === 'existing' ? ch.id : ch.kind === 'new' ? `new:${ch.actKind}` : ch.kind;
-                        const newName = ch.kind === 'new' ? ch.name : c.legend ?? `Colore ${c.fill}`;
+                        const val =
+                          ch.kind === 'existing' ? ch.id : ch.kind === 'new' ? `new:${ch.actKind}` : ch.kind === 'dayType' ? `dt:${ch.id}` : ch.kind === 'newDayType' ? 'newdt' : ch.kind;
+                        const newName = ch.kind === 'new' || ch.kind === 'newDayType' ? ch.name : c.legend ? c.legend.charAt(0).toUpperCase() + c.legend.slice(1) : `Colore ${c.fill}`;
+                        const remembered = !colorChoice[c.fill] && saved.has(c.fill);
                         return (
                           <tr key={c.fill}>
                             <td><span className="swatch" style={{ background: `#${c.fill}`, width: 26, height: 18, verticalAlign: 'middle' }} /> <span className="small muted">es. {c.sample}</span></td>
-                            <td>{c.legend ?? <span className="muted small">non in legenda</span>}</td>
+                            <td>
+                              {c.legend ?? <span className="muted small">non in legenda</span>}
+                              {remembered && <div className="small" style={{ color: 'var(--ok)' }}>scelta ricordata</div>}
+                            </td>
                             <td className="tabnum">{c.count}</td>
                             <td>
                               <select
@@ -422,15 +514,30 @@ export default function Importer(props: {
                                   const v = e.target.value;
                                   setColorChoice((s) => ({
                                     ...s,
-                                    [c.fill]: v === 'ignore' || v === 'skip' ? { kind: v } : v.startsWith('new:') ? { kind: 'new', name: newName, actKind: v.slice(4) as ActivityKind } : { kind: 'existing', id: v },
+                                    [c.fill]:
+                                      v === 'ignore' || v === 'skip'
+                                        ? { kind: v }
+                                        : v === 'newdt'
+                                          ? { kind: 'newDayType', name: newName }
+                                          : v.startsWith('dt:')
+                                            ? { kind: 'dayType', id: v.slice(3) }
+                                            : v.startsWith('new:')
+                                              ? { kind: 'new', name: newName, actKind: v.slice(4) as ActivityKind }
+                                              : { kind: 'existing', id: v },
                                   }));
                                 }}
                               >
                                 <option value="ignore">Nessun significato (usa l’orario normale)</option>
                                 <option value="skip">Non importare queste celle</option>
-                                {(['work', 'absence'] as ActivityKind[]).map((k) => (
-                                  <option key={k} value={`new:${k}`}>+ Nuova attività “{newName}” ({KIND_LABEL[k].toLowerCase()})</option>
-                                ))}
+                                <optgroup label="Tipo di giornata (colora lo sfondo del giorno)">
+                                  {liveDayTypes.map((d) => <option key={d.id} value={`dt:${d.id}`}>{d.name}</option>)}
+                                  {!liveDayTypes.some((d) => plain(d.name) === plain(newName)) && <option value="newdt">+ Nuovo tipo di giornata “{newName}”</option>}
+                                </optgroup>
+                                <optgroup label="Attività (cambia il turno)">
+                                  {(['work', 'absence'] as ActivityKind[]).map((k) => (
+                                    <option key={k} value={`new:${k}`}>+ Nuova attività “{newName}” ({KIND_LABEL[k].toLowerCase()})</option>
+                                  ))}
+                                </optgroup>
                                 <optgroup label="Attività esistenti">
                                   {props.activities.filter((a) => !a.archived).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                                 </optgroup>
@@ -511,6 +618,10 @@ export default function Importer(props: {
               <label className="check">
                 <input id="imp-publish" type="checkbox" checked={publish} onChange={(e) => setPublish(e.target.checked)} />
                 Pubblica subito le settimane e avvisa il team
+              </label>
+              <label className="check">
+                <input id="imp-breaks" type="checkbox" checked={withBreaks} disabled={!props.breakActivityId} onChange={(e) => setWithBreaks(e.target.checked)} />
+                Aggiungi le pause automatiche ({(props.breakRules.length ? props.breakRules : DEFAULT_RULES).map((r) => `${r.duration_minutes} min ${r.from === 'start' ? 'dopo' : 'prima della fine di'} ${r.offset_minutes / 60}h`).join(', ')})
               </label>
               {error && <div className="alert alert-bad">{error}</div>}
               <div className="row">

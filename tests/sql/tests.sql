@@ -229,4 +229,68 @@ do $$ begin
   assert exists (select 1 from people where email = 'maria.livigni@azienda.it' and 'Li Vigni' = any (aliases)), 'cognome composto';
 end $$;
 
+-- ---- 0002: giornate, assenze e scambi diretti del manager
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000c', false);
+set role authenticated;
+do $$
+declare g uuid := (select id from people where email = 'giulia.rossi@azienda.it');
+        m uuid := (select id from people where email = 'marco.bianchi@azienda.it');
+        sw uuid := (select id from day_types where name = 'Smart working');
+        fe uuid := (select id from activity_types where name = 'Permesso');
+        r requests;
+begin
+  -- tipo giornata
+  perform save_day_marks(jsonb_build_array(jsonb_build_object('person_id', g, 'day', '2026-11-10', 'day_type_id', sw)));
+  assert (select day_type_id from day_marks where person_id = g and day = '2026-11-10') = sw, 'giornata smart';
+  -- spostamento diretto: Giulia mar 10 -> Marco (libero quel giorno), il tipo giornata segue
+  begin
+    perform manager_swap(g, '2026-11-10', m, '2026-11-10', 'Copertura');
+    raise exception 'doveva bloccare per riposo';
+  exception when others then
+    assert sqlerrm like '%riposo%', sqlerrm;
+  end;
+  assert (select person_id from events where starts_at = '2026-11-10 14:00+01') = g, 'nulla cambiato dopo il blocco';
+  r := manager_swap(g, '2026-11-10', m, '2026-11-10', 'Copertura', true);
+  assert r.kind = 'give' and r.status = 'approved', 'cessione diretta';
+  assert (select person_id from events where starts_at = '2026-11-10 14:00+01') = m, 'turno spostato';
+  assert (select person_id from day_marks where day = '2026-11-10') = m, 'giornata spostata';
+  -- violazione riposo: rifiutato senza force
+  begin
+    perform manager_swap(m, '2026-11-10', g, '2026-11-11');
+    raise exception 'doveva fallire';
+  exception when others then
+    assert sqlerrm like '%non lavora%' or sqlerrm like '%riposo%', sqlerrm;
+  end;
+  -- permesso a ore inserito dal manager
+  r := manager_time_off(m, '2026-11-11', '2026-11-11', fe, '08:00', '10:00', 'Visita');
+  assert exists (select 1 from events where person_id = m and activity_id = fe and starts_at = '2026-11-11 08:00+01'), 'permesso inserito';
+  -- import con tipo giornata
+  perform import_schedule(jsonb_build_object('replace', false, 'from_date', '2026-11-20', 'to_date', '2026-11-20',
+    'day_type_create', '[{"key":"x","name":"Trasferta","color":"#aabbcc"}]'::jsonb,
+    'people_create', '[{"key":"n","full_name":"Nuova Persona"}]'::jsonb,
+    'rows', jsonb_build_array(jsonb_build_object('person_key','n','activity_id',(select id from activity_types where name='Chat'),'starts_at','2026-11-20 09:00+01','ends_at','2026-11-20 17:00+01')),
+    'marks', '[{"person_key":"n","day":"2026-11-20","day_type_key":"x"}]'::jsonb));
+  assert exists (select 1 from day_marks d join day_types t on t.id = d.day_type_id where t.name = 'Trasferta' and d.day = '2026-11-20'), 'giornata da import';
+end $$;
+reset role;
+
+-- agente: non può segnare giornate
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+set role authenticated;
+do $$ begin
+  begin
+    perform save_day_marks('[]');
+    raise exception 'agente non deve';
+  exception when others then
+    assert sqlerrm like 'Solo i manager%', sqlerrm;
+  end;
+  begin
+    perform manager_time_off(current_person_id(), '2026-11-12', '2026-11-12', (select id from activity_types where name='Ferie'));
+    raise exception 'agente non deve';
+  exception when others then
+    assert sqlerrm like 'Solo i manager%', sqlerrm;
+  end;
+end $$;
+reset role;
+
 select 'TUTTI I TEST SQL PASSATI';

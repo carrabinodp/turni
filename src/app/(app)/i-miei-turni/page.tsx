@@ -14,7 +14,7 @@ export default async function MyShiftsPage({ searchParams }: { searchParams: { w
   const from = week < today ? week : today;
   const to = addDays(week, 7) > horizon ? addDays(week, 7) : horizon;
 
-  const [{ data: ev }, { data: acts }, { data: people }, { data: reqs }, { data: pub }] = await Promise.all([
+  const [{ data: ev }, { data: acts }, { data: people }, { data: reqs }, { data: pub }, { data: dts }, { data: mks }] = await Promise.all([
     supabase
       .from('events')
       .select('id, person_id, activity_id, starts_at, ends_at, note, source, updated_at')
@@ -25,7 +25,11 @@ export default async function MyShiftsPage({ searchParams }: { searchParams: { w
     supabase.from('people').select('id, full_name, user_id').eq('active', true).order('full_name'),
     supabase.from('requests').select('*').in('status', ['pending_peer', 'open', 'pending_manager']),
     supabase.from('schedule_weeks').select('week_start').gte('week_start', addDays(weekStart(from), 0)).lte('week_start', to),
+    supabase.from('day_types').select('id, name, color'),
+    supabase.from('day_marks').select('day, day_type_id').eq('person_id', me.id).gte('day', week).lt('day', addDays(week, 7)),
   ]);
+  const dtById = new Map((dts ?? []).map((d) => [d.id as string, { name: d.name as string, color: d.color as string }]));
+  const markByDay = new Map((mks ?? []).map((m) => [m.day as string, dtById.get(m.day_type_id as string) ?? null]));
 
   const activities = (acts ?? []) as Activity[];
   const events = (ev ?? []) as EventRow[];
@@ -44,6 +48,7 @@ export default async function MyShiftsPage({ searchParams }: { searchParams: { w
       absence: sh?.absence ?? null,
       blocks: (sh?.blocks ?? []).map((b) => ({ ...b, color: activities.find((a) => a.id === b.activity_id)?.color ?? '#999', name: activities.find((a) => a.id === b.activity_id)?.name ?? '' })),
       hasShift: !!sh && Number.isFinite(sh.start),
+      dayType: markByDay.get(d) ?? null,
       pending: busyDay(me.id, d),
       canAct: d >= today && published.has(weekStart(d)),
     };
