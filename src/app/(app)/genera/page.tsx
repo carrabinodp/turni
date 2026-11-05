@@ -4,6 +4,8 @@ import { addDays, dayStart, localDate, todayIn, weekStart } from '@/lib/time';
 import { italianHolidays } from '@/lib/report';
 import { profileFromHistory, withGenDefaults, type Absence, type FixedDay, type History, type Pref } from '@/lib/generator';
 import type { Activity } from '@/lib/types';
+import type { IntervalAgg } from '@/lib/calls';
+import { bestMethod, byDay, forecastDays, requiredAgents, withForecastDefaults } from '@/lib/forecast';
 import GeneratorView from './GeneratorView';
 
 export const dynamic = 'force-dynamic';
@@ -88,6 +90,40 @@ export default async function GeneraPage({ searchParams }: { searchParams: { m?:
   const fixed: FixedDay[] = before.filter((s) => s.day >= weekStart(first)).map((s) => ({ ...s }));
   const suggest = Object.fromEntries(profileFromHistory(before.filter((s) => s.day >= addDays(first, -63))));
 
+  // operativi necessari per fascia oraria secondo il forecast (media per giorno della settimana)
+  let forecastTargets: Record<string, number[]> | null = null;
+  try {
+    const rows = await fetchAll<IntervalAgg>((a, b) =>
+      supabase
+        .from('call_intervals')
+        .select('day, slot, queue, offered, answered, abandoned, short_abandoned, ans_10, ans_20, ans_30, ans_60, ans_120, wait_sum_sec, handle_sum_sec')
+        .gte('day', addDays(first, -7 * 20))
+        .order('day').order('slot').order('queue')
+        .range(a, b),
+    );
+    if (rows.length) {
+      const policy = withForecastDefaults(settings.forecast_policy);
+      const hist = byDay(rows);
+      const monthDays: string[] = [];
+      for (let d = first; d < next; d = addDays(d, 1)) monthDays.push(d);
+      const fc = forecastDays(hist, monthDays, policy, bestMethod(hist, policy).method);
+      const sum: Record<string, number[]> = {}, n: Record<string, number> = {};
+      for (const f of fc) {
+        if (f.holiday) continue;
+        const wd = String(((new Date(f.day + 'T12:00:00Z').getUTCDay() + 6) % 7) + 1);
+        sum[wd] ??= new Array(24).fill(0);
+        n[wd] = (n[wd] ?? 0) + 1;
+        for (let h = 0; h < 24; h++) {
+          const r = Math.max(requiredAgents(f.calls[h * 2]!, f.aht[h * 2]!, policy), requiredAgents(f.calls[h * 2 + 1]!, f.aht[h * 2 + 1]!, policy));
+          sum[wd]![h]! += r;
+        }
+      }
+      forecastTargets = Object.fromEntries(Object.entries(sum).map(([wd, arr]) => [wd, arr.map((v) => Math.round(v / n[wd]!))]));
+    }
+  } catch {
+    forecastTargets = null; // forecast non ancora attivo
+  }
+
   const holidays = new Set<string>();
   [Number(month.slice(0, 4))].forEach((y) => italianHolidays(y).forEach((_, k) => k.startsWith(month) && holidays.add(k)));
 
@@ -117,6 +153,7 @@ export default async function GeneraPage({ searchParams }: { searchParams: { m?:
       holidays={Array.from(holidays)}
       publishedWeeks={(pub ?? []).map((w) => w.week_start as string)}
       existingInMonth={existingInMonth}
+      forecastTargets={forecastTargets}
     />
   );
 }

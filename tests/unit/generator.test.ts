@@ -9,6 +9,7 @@ const people: GenPerson[] = [
   { id: 'ton', name: 'Tonia', shiftHours: 4, daysPerWeek: 5, canWeekend: true },
 ];
 const config = withGenDefaults({
+  weekday: { maxOffice: 99 } as never,
   rec: {
     pool: [{ person_id: 'f0', start: '08:30', end: '17:30' }, { person_id: 'f1', start: '08:30', end: '17:30' }, { person_id: 'gab', start: '08:30', end: '14:30' }],
     companions: [{ when: 'gab', person_id: 'ton', start: '14:30', end: '18:30' }],
@@ -211,4 +212,27 @@ test('il generatore applica le nuove preferenze', () => {
   assert.ok(!on('f7', '2027-02-15'), 'riposo principale dato');
   assert.ok(r.shifts.filter((s) => s.person_id === 'f8' && isoWeekday(s.day) >= 6).every((s) => s.day === '2027-02-13'), 'weekend solo nel giorno disponibile');
   assert.equal(r.issues.filter((i) => i.text.startsWith('Preferenza')).length, 0, JSON.stringify(r.issues.filter((i) => i.text.startsWith('Preferenza'))));
+});
+
+test('massimo in ufficio e operativi desiderati per fascia oraria', () => {
+  const targets: Record<string, (number | null)[]> = {};
+  for (const wd of [1, 2, 3, 4, 5]) {
+    const t: (number | null)[] = new Array(24).fill(null);
+    t[9] = 14; t[10] = 16; t[11] = 16; t[14] = 12; t[15] = 12;
+    targets[String(wd)] = t;
+  }
+  const cfg = withGenDefaults({ ...config, weekday: { ...config.weekday, maxOffice: 12 }, targets });
+  const r = generate({ month: '2027-02', people, config: cfg, prefs: [], absences: [], fixed: [], history: empty });
+  for (const d of r.days.filter((x) => isoWeekday(x) <= 5)) {
+    const day = r.shifts.filter((s) => s.day === d);
+    assert.ok(day.filter((s) => s.office).length <= 12, `${d} max 12 in ufficio`);
+    assert.ok(day.filter((s) => s.start <= toMin('08:00') && s.office).length >= 2, `${d} presenza in apertura`);
+  }
+  assert.ok(r.shifts.filter((s) => isoWeekday(s.day) >= 6).every((s) => !s.office), 'weekend smart');
+  // 25 persone × 3 giorni non entrano in 12 posti: lo segnala
+  assert.ok(r.issues.some((i) => i.text.includes('ufficio pieno')));
+  // con gli obiettivi per fascia la mattina è più coperta che con tutti alle 9 e basta
+  const at = (d: string, h: number) => r.shifts.filter((s) => s.day === d && s.role === 'op' && s.start <= h * 60 + 15 && s.end > h * 60 + 15).length;
+  const d0 = '2027-02-03';
+  assert.ok(at(d0, 10) >= at(d0, 15), 'più persone alle 10 che alle 15');
 });

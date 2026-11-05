@@ -46,6 +46,8 @@ export interface GenConfig {
   weekday: {
     open: string; close: string; openOps: number; closeOps: number;
     after1800: number; after1830: number; officeAtOpen: number; officeAtClose: number; maxClosePerWeek: number;
+    /** persone al massimo in ufficio nello stesso giorno */
+    maxOffice: number;
   };
   saturday: { enabled: boolean; open: string; close: string; people: number; maxPeople: number; at1000: number; afternoon: number; closeMin: number; closeMax: number };
   sunday: { enabled: boolean; people: number; start: string; end: string };
@@ -55,6 +57,8 @@ export interface GenConfig {
   maxSaturdaysPerMonth: number;
   activities: { phone: string | null; rec: string | null; reclami: string | null; sunday?: string | null };
   dayTypes: { office: string | null; remote: string | null };
+  /** operativi desiderati per fascia oraria: giorno della settimana (1–7) → 24 valori, uno per ora (null = nessuna preferenza) */
+  targets?: Record<string, (number | null)[]>;
   /** regole particolari per persona */
   personRules?: Record<string, PersonRule>;
   /** assegnazioni scelte a mano per settimana (lunedì → persona) */
@@ -62,7 +66,7 @@ export interface GenConfig {
 }
 
 export const DEFAULT_GEN: GenConfig = {
-  weekday: { open: '08:00', close: '20:00', openOps: 3, closeOps: 3, after1800: 6, after1830: 4, officeAtOpen: 2, officeAtClose: 2, maxClosePerWeek: 1 },
+  weekday: { open: '08:00', close: '20:00', openOps: 3, closeOps: 3, after1800: 6, after1830: 4, officeAtOpen: 2, officeAtClose: 2, maxClosePerWeek: 1, maxOffice: 12 },
   saturday: { enabled: true, open: '09:00', close: '20:00', people: 6, maxPeople: 7, at1000: 5, afternoon: 4, closeMin: 1, closeMax: 2 },
   sunday: { enabled: true, people: 1, start: '10:00', end: '18:00' },
   rec: { pool: [], companions: [], saturday: false },
@@ -524,8 +528,13 @@ export function generate(input: {
         }
       }
 
-      // 4. tutti gli altri alle 9 (picco di chiamate); chi ha vincoli di orario si adatta
-      for (const p of pool()) {
+      // 4. tutti gli altri: alle 9 (picco di chiamate) oppure, se ci sono gli operativi desiderati
+      //    per fascia oraria, dove mancano più persone
+      const target = c.targets?.[String(isoDow(d))];
+      const hasTarget = !!target?.some((x) => x !== null && x !== undefined);
+      const present = (h: number) => dayShifts.filter((s) => s.role === 'op' && s.start <= h * 60 + 15 && s.end > h * 60 + 15).length;
+      const rest = pool().sort((a, b) => L(b) - L(a)); // prima i turni lunghi
+      for (const p of rest) {
         const r = rules.get(p.id)!;
         let start = toMin('09:00');
         if (p.maxStart) start = Math.min(start, toMin(p.maxStart));
@@ -533,7 +542,28 @@ export function generate(input: {
         if (r.startAfter !== null) start = Math.max(start, r.startAfter);
         if (r.endBy !== null && start + L(p) > r.endBy) start = Math.max(openM, r.endBy - L(p));
         if (start + L(p) > closeM) start = closeM - L(p);
+        if (hasTarget) {
+          let best = start, bestScore = -Infinity;
+          for (let st = openM; st + L(p) <= closeM; st += 30) {
+            if (!fits(p, st, st + L(p))) continue;
+            let score = 0;
+            for (let h = Math.floor(st / 60); h * 60 < st + L(p); h++) {
+              const want = target![h];
+              if (want === null || want === undefined) continue;
+              const mid = h * 60 + 15;
+              if (mid < st || mid >= st + L(p)) continue;
+              score += present(h) < want ? 10 : -1; // copre un buco · un'ora in più del necessario
+            }
+            score -= Math.abs(st - toMin('09:00')) / 600; // a parità, vicino alle 9
+            if (score > bestScore) { bestScore = score; best = st; }
+          }
+          start = best;
+        }
         assign(p, start);
+      }
+      if (hasTarget) {
+        const short = Array.from({ length: 24 }, (_, h) => h).filter((h) => target![h] !== null && target![h] !== undefined && present(h) < target![h]!);
+        if (short.length) issues.push({ day: d, level: 'warn', text: `Sotto gli operativi desiderati alle ${short.map((h) => `${h} (${present(h)}/${target![h]})`).join(', ')}` });
       }
 
       // 5. Reclami: apre o chiude dove serve presenza
@@ -559,10 +589,13 @@ export function generate(input: {
       quota.set(p.id, Math.min(p.officeDays ?? c.officeDaysPerWeek, n));
     });
     wdShifts.filter((s) => s.office).forEach((s) => quota.set(s.person_id, (quota.get(s.person_id) ?? 0) - 1));
-    const setOffice = (s: GenShift) => {
-      if (lockedRemote.has(s)) return;
+    const officeOn = (d: string) => wdShifts.filter((x) => x.day === d && x.office).length;
+    const setOffice = (s: GenShift, force = false) => {
+      if (lockedRemote.has(s)) return false;
+      if (!force && officeOn(s.day) >= W.maxOffice) return false; // ufficio pieno
       s.office = true;
       quota.set(s.person_id, (quota.get(s.person_id) ?? 0) - 1);
+      return true;
     };
     // dove l'operatore ha chiesto ufficio o smart in quel giorno
     const lockedRemote = new Set<GenShift>();
@@ -585,26 +618,32 @@ export function generate(input: {
         const cand = group.filter((s) => !s.office).sort((a, b) => (b.role === 'reclami' ? 1 : 0) - (a.role === 'reclami' ? 1 : 0) || (quota.get(b.person_id) ?? 0) - (quota.get(a.person_id) ?? 0));
         for (const s of cand) {
           if (have >= need) break;
-          if ((quota.get(s.person_id) ?? 0) > 0) {
-            setOffice(s);
-            have++;
-          }
+          if ((quota.get(s.person_id) ?? 0) > 0 && setOffice(s)) have++;
         }
         if (have < need) issues.push({ day: d, level: 'warn', text: `${group === day.filter((s) => s.start <= openM) ? 'Apertura' : 'Chiusura'}: ${have} in ufficio (servono ${need})` });
       }
     }
-    // il resto della quota: nei giorni con meno persone in ufficio
-    for (const p of people) {
-      let q = quota.get(p.id) ?? 0;
-      const mine = wdShifts.filter((s) => s.person_id === p.id && !s.office);
-      while (q > 0 && mine.some((s) => !s.office)) {
-        const s = mine
-          .filter((x) => !x.office)
-          .sort((a, b) => wdShifts.filter((x) => x.day === a.day && x.office).length - wdShifts.filter((x) => x.day === b.day && x.office).length || rand() - 0.5)[0]!;
-        setOffice(s);
-        q--;
+    // il resto della quota: un giorno a testa per giro, nei giorni con meno persone in ufficio,
+    // senza superare il massimo; prima chi deve stare sempre in ufficio
+    for (let round = 0; round < 7; round++) {
+      const order = [...people].sort((a, b) => (b.officeDays ?? 0) - (a.officeDays ?? 0) || (quota.get(b.id) ?? 0) - (quota.get(a.id) ?? 0) || rand() - 0.5);
+      let moved = false;
+      for (const p of order) {
+        if ((quota.get(p.id) ?? 0) <= 0) continue;
+        const free = wdShifts
+          .filter((x) => x.person_id === p.id && !x.office && !lockedRemote.has(x) && officeOn(x.day) < W.maxOffice)
+          .sort((a, b) => officeOn(a.day) - officeOn(b.day) || rand() - 0.5);
+        if (free[0] && setOffice(free[0])) moved = true;
       }
+      if (!moved) break;
     }
+    const short = people.filter((p) => (quota.get(p.id) ?? 0) > 0 && wdShifts.some((x) => x.person_id === p.id));
+    if (short.length)
+      issues.push({
+        day: null, level: 'warn',
+        text: `Settimana del ${w.slice(8)}/${w.slice(5, 7)}: con al massimo ${W.maxOffice} in ufficio, ${short.length} persone hanno meno giorni in ufficio del previsto (ufficio pieno): ${short.map((p) => `${p.name} −${quota.get(p.id)}`).join(', ')}`,
+      });
+    for (const d of wdFree) if (officeOn(d) > W.maxOffice) issues.push({ day: d, level: 'warn', text: `${officeOn(d)} persone in ufficio (max ${W.maxOffice})` });
 
     // controlli finali della settimana
     for (const d of wdFree) {

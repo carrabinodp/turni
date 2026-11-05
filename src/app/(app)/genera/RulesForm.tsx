@@ -5,7 +5,7 @@ import type { GenConfig } from '@/lib/generator';
 import { saveGenConfig } from './actions';
 import type { GActivity, GDayType, GPerson } from './GeneratorView';
 
-export default function RulesForm({ config, people, activities, dayTypes, officeDaysPerWeek }: { config: GenConfig; people: GPerson[]; activities: GActivity[]; dayTypes: GDayType[]; officeDaysPerWeek: number }) {
+export default function RulesForm({ config, people, activities, dayTypes, officeDaysPerWeek, forecastTargets }: { config: GenConfig; people: GPerson[]; activities: GActivity[]; dayTypes: GDayType[]; officeDaysPerWeek: number; forecastTargets: Record<string, number[]> | null }) {
   const [c, setC] = useState<GenConfig>({ ...config, weekRoles: undefined });
   const { run, busy } = useAction();
   const W = c.weekday, S = c.saturday, D = c.sunday;
@@ -37,10 +37,13 @@ export default function RulesForm({ config, people, activities, dayTypes, office
           <label className="field"><span>Chiusure max a settimana a testa</span>{num(W.maxClosePerWeek, (n) => setW('maxClosePerWeek', n), 70, 0, 5)}</label>
           <label className="field"><span>In ufficio all’apertura</span>{num(W.officeAtOpen, (n) => setW('officeAtOpen', n))}</label>
           <label className="field"><span>In ufficio alla chiusura</span>{num(W.officeAtClose, (n) => setW('officeAtClose', n))}</label>
+          <label className="field"><span>Massimo in ufficio al giorno</span>{num(W.maxOffice ?? 12, (n) => setW('maxOffice', n), 70, 1, 60)}</label>
           <div className="field"><span>Giorni in ufficio a settimana</span><div className="small" style={{ paddingTop: 8 }}><b>{officeDaysPerWeek}</b> · si cambia in Configura → Impostazioni</div></div>
         </div>
-        <p className="small muted" style={{ margin: 0, padding: '0 16px 12px' }}>Tutti gli altri entrano alle 9, l’ora con più chiamate. REC, Reclami e affiancamento non contano tra gli operativi.</p>
+        <p className="small muted" style={{ margin: 0, padding: '0 16px 12px' }}>Tutti gli altri entrano alle 9, l’ora con più chiamate, oppure dove mancano persone secondo la tabella qui sotto. REC, Reclami e affiancamento non contano tra gli operativi.</p>
       </section>
+
+      <Targets c={c} setC={setC} forecastTargets={forecastTargets} />
 
       <section className="card">
         <div className="card-head"><b>Weekend e festivi</b></div>
@@ -59,7 +62,7 @@ export default function RulesForm({ config, people, activities, dayTypes, office
           <label className="field"><span>Dalle</span>{time(D.start, (t) => setD('start', t))}</label>
           <label className="field"><span>Alle</span>{time(D.end, (t) => setD('end', t))}</label>
         </div>
-        <p className="small muted" style={{ margin: 0, padding: '0 16px 12px' }}>Chi lavora sabato o domenica riposa un giorno in settimana. Weekend sempre in smart. I festivi infrasettimanali seguono le regole della domenica.</p>
+        <p className="small muted" style={{ margin: 0, padding: '0 16px 12px' }}>Chi lavora sabato o domenica riposa un giorno in settimana. Sabato, domenica e festivi sono sempre in smart. I festivi infrasettimanali seguono le regole della domenica.</p>
       </section>
 
       <section className="card">
@@ -143,5 +146,67 @@ export default function RulesForm({ config, people, activities, dayTypes, office
 
       <div><button className="btn btn-primary" disabled={busy} onClick={() => run(() => saveGenConfig(c))}>Salva regole</button></div>
     </>
+  );
+}
+
+const DAYS = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven']; // sabato e domenica hanno le loro regole
+const HOURS = Array.from({ length: 13 }, (_, i) => 8 + i); // 8 … 20
+
+/** operativi desiderati per fascia oraria (ora piena), per giorno della settimana */
+function Targets({ c, setC, forecastTargets }: { c: GenConfig; setC: (c: GenConfig) => void; forecastTargets: Record<string, number[]> | null }) {
+  const t = c.targets ?? {};
+  const get = (wd: number, h: number) => t[String(wd)]?.[h] ?? null;
+  const set = (wd: number, h: number, v: number | null) => {
+    const row = [...(t[String(wd)] ?? new Array(24).fill(null))];
+    row[h] = v;
+    setC({ ...c, targets: { ...t, [String(wd)]: row } });
+  };
+  const copyMon = () => setC({ ...c, targets: { ...t, ...Object.fromEntries([2, 3, 4, 5].map((wd) => [String(wd), [...(t['1'] ?? new Array(24).fill(null))]])) } });
+  const fromForecast = () => {
+    if (!forecastTargets) return;
+    const next: Record<string, (number | null)[]> = {};
+    for (let wd = 1; wd <= 5; wd++) {
+      const f = forecastTargets[String(wd)];
+      next[String(wd)] = Array.from({ length: 24 }, (_, h) => (f && f[h]! > 0 && HOURS.includes(h) ? f[h]! : null));
+    }
+    setC({ ...c, targets: next });
+  };
+  return (
+    <section className="card">
+      <div className="card-head">
+        <b>Operativi desiderati per fascia oraria</b>
+        <div className="row">
+          <button className="btn btn-sm" onClick={copyMon}>Copia il lunedì su mar–ven</button>
+          <button className="btn btn-sm" disabled={!forecastTargets} title={forecastTargets ? 'Persone necessarie al telefono secondo il forecast del mese' : 'Carica le chiamate in Forecast per usarlo'} onClick={fromForecast}>Usa il forecast</button>
+          <button className="btn btn-sm btn-ghost" onClick={() => setC({ ...c, targets: {} })}>Svuota</button>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table className="tg">
+          <thead><tr><th />{HOURS.map((h) => <th key={h}>{h}–{h + 1}</th>)}</tr></thead>
+          <tbody>
+            {DAYS.map((d, i) => (
+              <tr key={d}>
+                <th>{d}</th>
+                {HOURS.map((h) => (
+                  <td key={h}>
+                    <input
+                      type="number" min={0} max={60} value={get(i + 1, h) ?? ''} aria-label={`${d} ${h}`}
+                      placeholder={forecastTargets?.[String(i + 1)]?.[h] ? String(forecastTargets[String(i + 1)]![h]) : ''}
+                      onChange={(e) => set(i + 1, h, e.target.value === '' ? null : Number(e.target.value))}
+                    />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="small muted" style={{ margin: 0, padding: '8px 16px 12px' }}>
+        Quante persone operative vorresti in ogni ora (REC e Reclami esclusi). Vuoto = nessuna preferenza. Il generatore mette prima aperture, chiusure e sera, poi distribuisce gli altri dove mancano più persone
+        e segnala le ore che restano sotto. In grigio i numeri del forecast, se ci sono le chiamate caricate.
+      </p>
+      <style dangerouslySetInnerHTML={{ __html: `.tg{border-collapse:collapse;margin:8px 12px;font-size:12.5px}.tg th{font-weight:500;color:var(--muted);padding:4px 6px;white-space:nowrap}.tg td{padding:2px}.tg input{width:46px;height:28px;border:1px solid var(--line);border-radius:4px;text-align:center;font:inherit}.tg input::placeholder{color:#b8bdc7}` }} />
+    </section>
   );
 }

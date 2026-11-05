@@ -47,6 +47,7 @@ export default function GeneratorView(props: {
   holidays: string[];
   publishedWeeks: string[];
   existingInMonth: number;
+  forecastTargets?: Record<string, number[]> | null;
 }) {
   const { month, tz } = props;
   const router = useRouter();
@@ -166,7 +167,7 @@ export default function GeneratorView(props: {
         ))}
       </div>
 
-      {tab === 'regole' && <RulesForm config={props.config} people={props.people} activities={props.activities} dayTypes={props.dayTypes} officeDaysPerWeek={props.officeDaysPerWeek} />}
+      {tab === 'regole' && <RulesForm forecastTargets={props.forecastTargets ?? null} config={props.config} people={props.people} activities={props.activities} dayTypes={props.dayTypes} officeDaysPerWeek={props.officeDaysPerWeek} />}
       {tab === 'persone' && <PeopleForm people={props.people} suggest={props.suggest} config={props.config} />}
       {tab === 'preferenze' && <PrefsPanel month={month} people={props.people} prefs={props.prefs} absences={props.absences} />}
 
