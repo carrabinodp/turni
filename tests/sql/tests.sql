@@ -430,4 +430,23 @@ do $$ begin
   assert (select (forecast_policy->>'sl_target')::int from settings) = 90, 'manager salva impostazioni forecast';
 end $$;
 
+-- ---- 0006: nei cambi turno compaiono anche i colleghi che non sono ancora entrati
+reset role;
+select set_config('app.bulk', 'on', false);
+insert into people (full_name, active) values ('Nuovo Collega', true);
+insert into schedule_weeks (week_start) values ('2026-12-14') on conflict do nothing;
+insert into events (person_id, activity_id, starts_at, ends_at)
+select p.id, (select id from activity_types where name = 'Telefono'), x.s::timestamptz, x.e::timestamptz
+from (values ('Nuovo Collega', '2026-12-14 13:00+01', '2026-12-14 21:00+01'),
+             ('Giulia Rossi', '2026-12-14 09:00+01', '2026-12-14 17:00+01')) x(n, s, e)
+join people p on p.full_name = x.n;
+select set_config('app.bulk', 'off', false);
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+set role authenticated;
+do $$ begin
+  assert exists (select 1 from swap_candidates('2026-12-14', '2026-12-14', '2026-12-14')
+                 where full_name = 'Nuovo Collega' and issues[1] like '%non è ancora entrato%'), 'collega senza accesso proposto con avviso';
+end $$;
+reset role;
+
 select 'TUTTI I TEST SQL PASSATI';
