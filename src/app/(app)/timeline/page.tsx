@@ -2,6 +2,8 @@ import { getSession } from '@/lib/session';
 import { fetchAll } from '@/lib/fetchAll';
 import Timeline from '@/components/timeline/Timeline';
 import { addDays, dayStart, diffDays, isValidDate, todayIn, weekStart } from '@/lib/time';
+import { dayForecast, withForecastDefaults } from '@/lib/forecast';
+import type { IntervalAgg } from '@/lib/calls';
 import type { Activity, DayMark, DayType, EventRow, Person } from '@/lib/types';
 import { copyWeekAction, eventHistoryAction, managerSwapAction, managerTimeOffAction, publishWeekAction, saveScheduleAction } from './actions';
 
@@ -39,6 +41,25 @@ export default async function TimelinePage({ searchParams }: { searchParams: { d
     ).then((data) => ({ data })),
   ]);
 
+  // forecast nella vista giorno, solo per i responsabili (i dati chiamate sono loro)
+  let forecast = null;
+  if (isManager && view === 'day') {
+    const policy = withForecastDefaults(settings.forecast_policy);
+    const rows = await fetchAll<IntervalAgg>((a, b) =>
+      supabase
+        .from('call_intervals')
+        .select('day, slot, queue, offered, answered, abandoned, short_abandoned, ans_10, ans_20, ans_30, ans_60, ans_120, wait_sum_sec, handle_sum_sec')
+        .gte('day', addDays(date, -7 * (policy.history_weeks + 9)))
+        .lte('day', date)
+        .order('day')
+        .order('slot')
+        .order('queue')
+        .range(a, b),
+    ).catch(() => [] as IntervalAgg[]);
+    const f = rows.length ? dayForecast(rows, date, policy) : null;
+    if (f) forecast = { ...f, phoneIds: settings.forecast_activity_ids ?? [] };
+  }
+
   const evs = (events.data ?? []) as EventRow[];
   const mk = (marks.data ?? []) as DayMark[];
   const pub = (weeks.data ?? []).map((w) => w.week_start as string);
@@ -72,6 +93,7 @@ export default async function TimelinePage({ searchParams }: { searchParams: { d
       onTimeOff={isManager ? managerTimeOffAction : undefined}
       onSwap={isManager ? managerSwapAction : undefined}
       onHistory={isManager ? eventHistoryAction : undefined}
+      forecast={forecast}
     />
   );
 }

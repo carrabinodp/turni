@@ -401,4 +401,33 @@ begin
 end $$;
 reset role;
 
+-- ---- 0005: dati chiamate solo per i manager
+reset role;
+do $$ begin
+  assert (select cardinality(forecast_activity_ids) from settings) = 1, 'Telefono come attività telefonica di base';
+end $$;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000c', false);
+set role authenticated;
+insert into call_intervals (day, slot, offered, answered) values ('2026-11-02', 18, 30, 28);
+reset role;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+set role authenticated;
+do $$ begin
+  assert (select count(*) from call_intervals) = 0, 'operatore non vede i dati chiamate';
+  begin
+    perform save_forecast_settings('{"sl_target":90}'::jsonb, '{}');
+    raise exception 'doveva fallire';
+  exception when others then
+    if sqlerrm = 'doveva fallire' then raise; end if;
+  end;
+end $$;
+reset role;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000c', false);
+set role authenticated;
+select save_forecast_settings('{"sl_target":90,"sl_seconds":30,"max_occupancy":85,"history_weeks":8}'::jsonb, '{}');
+reset role;
+do $$ begin
+  assert (select (forecast_policy->>'sl_target')::int from settings) = 90, 'manager salva impostazioni forecast';
+end $$;
+
 select 'TUTTI I TEST SQL PASSATI';

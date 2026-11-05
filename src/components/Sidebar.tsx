@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import {
-  Logo, IcChart, IcTimeline, IcMe, IcSwap, IcOff, IcImport, IcTeam, IcGear, IcBell, IcLog, IcOut, IcMenu, IcClose,
+  Logo, IcChart, IcTrend, IcTimeline, IcMe, IcSwap, IcOff, IcImport, IcTeam, IcGear, IcBell, IcLog, IcOut, IcMenu, IcClose,
 } from './icons';
 import { initials } from '@/lib/names';
 import { ROLE_LABEL, type Role } from '@/lib/types';
@@ -63,6 +63,7 @@ export default function Sidebar({ me, orgName, isManager, counts }: Props) {
               <span className="label">Gestione</span>
               {link('/import', 'Importa Excel', IcImport)}
               {link('/team', 'Persone', IcTeam)}
+              {link('/forecast', 'Forecast', IcTrend)}
               {link('/report', 'Report mensile', IcChart)}
               {link('/registro', 'Registro modifiche', IcLog)}
               {link('/configura', 'Configura', IcGear)}

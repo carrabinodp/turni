@@ -59,6 +59,8 @@ export interface TimelineProps {
   onTimeOff?: (p: AbsenceInput) => Promise<ActionResult>;
   onSwap?: (p: SwapInput) => Promise<ActionResult>;
   onHistory?: (eventId: string) => Promise<HistoryRow[]>;
+  /** solo vista giorno, responsabili: previsione chiamate e persone necessarie per mezz'ora (48 valori) */
+  forecast?: { calls: number[]; required: number[]; actual: number[] | null; phoneIds: string[]; holiday: string | null } | null;
   /** solo anteprima: niente navigazione */
   navigate?: (date: string, view: View, to?: string) => void;
 }
@@ -404,6 +406,22 @@ export default function Timeline(props: TimelineProps) {
     const actRows = workActs.filter((a) => per.get(a.id)!.some((n) => n > 0)).map((a) => ({ a, values: per.get(a.id)! }));
     return { slots, total, max, actRows };
   }, [byPerson, startMs, endMs, slotMin, usable, actById, compact, days, win.h0, win.h1, dayStarts]);
+
+  /* ---- previsione chiamate (vista giorno): si aggiorna mentre si spostano i turni ---- */
+  const fcRows = useMemo(() => {
+    const f = props.forecast;
+    if (!f || view !== 'day') return null;
+    const at = (arr: number[], t: number) => arr[Math.min(47, Math.floor(minuteOfDay(t, tz) / 30))] ?? 0;
+    const phone = new Set(f.phoneIds);
+    const staffed = metrics.slots.map((_, i) => metrics.actRows.filter((r) => phone.has(r.a.id)).reduce((t, r) => t + r.values[i]!, 0));
+    const required = metrics.slots.map((t) => at(f.required, t));
+    return {
+      calls: metrics.slots.map((t) => Math.round(at(f.calls, t))),
+      actual: f.actual ? metrics.slots.map((t) => at(f.actual!, t)) : null,
+      required,
+      diff: staffed.map((v, i) => (required[i]! || v ? v - required[i]! : NaN)),
+    };
+  }, [props.forecast, view, metrics, tz]);
 
   /* ---- scroll iniziale ---- */
   useLayoutEffect(() => {
@@ -1094,6 +1112,17 @@ export default function Timeline(props: TimelineProps) {
                 {view === 'day' && metrics.actRows.map(({ a, values }) => (
                   <MetricRow nameW={NAME_W} trackW={trackW} key={a.id} label={a.name} color={a.color} values={values} max={metrics.max} slots={metrics.slots} slotMin={slotMin} x={x} />
                 ))}
+                {fcRows && (
+                  <>
+                    {fcRows.actual ? (
+                      <MetricRow nameW={NAME_W} trackW={trackW} label="Chiamate ricevute" values={fcRows.actual} max={1} slots={metrics.slots} slotMin={slotMin} x={x} plain />
+                    ) : (
+                      <MetricRow nameW={NAME_W} trackW={trackW} label="Chiamate previste" values={fcRows.calls} max={1} slots={metrics.slots} slotMin={slotMin} x={x} plain />
+                    )}
+                    <MetricRow nameW={NAME_W} trackW={trackW} label="Necessari al telefono" values={fcRows.required} max={1} slots={metrics.slots} slotMin={slotMin} x={x} plain />
+                    <MetricRow nameW={NAME_W} trackW={trackW} label="Copertura telefono" values={fcRows.diff} max={1} slots={metrics.slots} slotMin={slotMin} x={x} diff />
+                  </>
+                )}
               </>
             )}
           </div>
@@ -1418,7 +1447,7 @@ function MetricRow(props: {
   nameW: number;
   trackW: number;
   label: string; color?: string; values: number[]; max: number; slots: number[]; slotMin: number;
-  x: (ms: number) => number; total?: boolean;
+  x: (ms: number) => number; total?: boolean; plain?: boolean; diff?: boolean;
 }) {
   const { values, max, slots, slotMin, x } = props;
   return (
@@ -1431,11 +1460,20 @@ function MetricRow(props: {
         {slots.map((t, i) => {
           const v = values[i]!;
           const r = v / max;
-          const cls = !v ? 'z' : props.total ? (r > 0.75 ? 'h3' : r > 0.4 ? 'h2' : 'h1') : '';
           const w = x(t + slotMin * MIN) - x(t);
+          if (props.diff) {
+            if (Number.isNaN(v)) return <span key={t} className="z" style={{ left: x(t), width: w }} />;
+            const c = v < 0 ? (v <= -2 ? 'neg2' : 'neg') : v > 1 ? 'pos' : 'even';
+            return (
+              <span key={t} className={`tabnum ${c}`} style={{ left: x(t), width: w }} title={v < 0 ? `Mancano ${-v} persone al telefono` : v > 0 ? `${v} in più del necessario` : 'Copertura giusta'}>
+                {w >= 18 ? (v > 0 ? `+${v}` : v < 0 ? `−${-v}` : '=') : ''}
+              </span>
+            );
+          }
+          const cls = !v ? 'z' : props.total ? (r > 0.75 ? 'h3' : r > 0.4 ? 'h2' : 'h1') : '';
           return (
             <span key={t} className={`tabnum ${cls}`} style={{ left: x(t), width: w }}>
-              {w >= 18 ? v : ''}
+              {w >= 18 ? (props.plain && !v ? '' : v) : ''}
             </span>
           );
         })}

@@ -22,6 +22,8 @@ export interface Settings {
   break_activity_id?: string | null;
   break_policy?: Partial<import('./breaks').BreakPolicy> | null;
   lunch_activity_id?: string | null;
+  forecast_policy?: Partial<import('./forecast').ForecastPolicy> | null;
+  forecast_activity_ids?: string[] | null;
 }
 
 export interface Person {

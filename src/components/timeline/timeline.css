@@ -54,6 +54,10 @@
 .tl-metric .h2 { background: var(--heat-2); }
 .tl-metric .h3 { background: var(--heat-3); }
 .tl-metric .z { color: var(--muted); }
+.tl-metric .neg { background: var(--bad-soft); color: var(--bad); font-weight: 600; }
+.tl-metric .neg2 { background: #f6b3ae; color: #8f1f1a; font-weight: 600; }
+.tl-metric .pos { background: #eef3fd; color: var(--accent); }
+.tl-metric .even { background: var(--ok-soft); color: var(--ok); }
 .tl-tools { position: sticky; top: 0; }
 
 /* righe persone */

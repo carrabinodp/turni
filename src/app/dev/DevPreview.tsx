@@ -10,6 +10,9 @@ import TeamTable from '../(app)/team/TeamTable';
 import Settings from '../(app)/impostazioni/Settings';
 import ReportView from '../(app)/report/ReportView';
 import { monthlySummary } from '@/lib/report';
+import ForecastView from '../(app)/forecast/ForecastView';
+import { aggregate, type Call } from '@/lib/calls';
+import { phoneStaffing, dayForecast, DEFAULT_FORECAST } from '@/lib/forecast';
 import type { Activity, DayMark, DayType, EventRow } from '@/lib/types';
 import { localToUtc, todayIn, weekStart, addDays } from '@/lib/time';
 
@@ -55,6 +58,28 @@ function buildEvents(dates: string[]): EventRow[] {
   return out.filter((e) => Date.parse(e.ends_at) > Date.parse(e.starts_at));
 }
 
+/** 12 settimane di chiamate finte con picco mattutino, lunedì pieno e qualche giorno storto */
+function fakeCalls(until: string): Call[] {
+  const out: Call[] = [];
+  let seed = 11;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const start = addDays(weekStart(until), -84);
+  for (let d = start; d < until; d = addDays(d, 1)) {
+    const dow = new Date(d + 'T12:00:00Z').getUTCDay();
+    const base = dow === 0 ? 40 : dow === 6 ? 160 : dow === 1 ? 520 : 400;
+    const n = Math.round(base * (0.9 + rnd() * 0.2) * (1 + (Date.parse(d) - Date.parse(start)) / 86400000 / 900));
+    for (let i = 0; i < n; i++) {
+      const r = rnd();
+      const h = r < 0.35 ? 9 + rnd() * 3 : r < 0.55 ? 14 + rnd() * 3 : 8 + rnd() * 12;
+      const s = localToUtc(d, `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`, TZ);
+      const busy = h >= 9 && h < 11.5 ? 0.25 : h >= 13 && h < 14 ? 0.3 : 0.05;
+      const answered = rnd() > busy * 0.6;
+      out.push({ s, answered, wait: Math.floor(rnd() * (busy > 0.1 ? 120 : 25)), handle: answered ? 140 + Math.floor(rnd() * 120) : 0, queue: '' });
+    }
+  }
+  return out;
+}
+
 export default function DevPreview({ screen }: { screen: string }) {
   const today = todayIn(TZ);
   const [date, setDate] = useState(today);
@@ -75,11 +100,42 @@ export default function DevPreview({ screen }: { screen: string }) {
     return out;
   }, [from, n]);
 
+  const fc = useMemo(() => (view === 'day' ? dayForecast(aggregate(fakeCalls(today), TZ, false), date, DEFAULT_FORECAST) : null), [view, date, today]);
+
   return (
     <div className="shell">
       <Sidebar me={{ name: 'Carlo Carrabino', role: 'admin' }} orgName="Turni Supporto" isManager isAdmin counts={{ requests: 2, notifications: 1 }} />
       <main className="main">
-        {screen === 'report' ? (
+        {screen.startsWith('forecast') ? (
+          (() => {
+            const w = weekStart(today);
+            const intervals = aggregate(fakeCalls(today), TZ, false);
+            const kind = new Map(ACTS.map((a) => [a.id, a.kind as string]));
+            const staffFor = (a: string, n: number) => {
+              const days = Array.from({ length: n }, (_, i) => addDays(a, i));
+              const ev = buildEvents(days);
+              return Object.fromEntries(phoneStaffing(ev.map((e) => ({ person_id: e.person_id, activity_id: e.activity_id, s: Date.parse(e.starts_at), e: Date.parse(e.ends_at) })), (id) => kind.get(id) ?? 'work', new Set(['tel']), days, TZ));
+            };
+            const last = intervals[intervals.length - 1]!.day;
+            return (
+              <ForecastView
+                tz={TZ}
+                today={today}
+                intervals={screen === 'forecast-empty' ? [] : intervals}
+                uploads={[{ id: 'u1', file_name: 'chiamate_ago_ott.xlsx', from_day: intervals[0]!.day, to_day: last, calls: 98234, queues: [], uploaded_at: '2026-11-04T09:12:00Z' }]}
+                activities={ACTS.filter((a) => a.kind === 'work').map((a) => ({ id: a.id, name: a.name, color: a.color }))}
+                phoneIds={['tel']}
+                policy={DEFAULT_FORECAST}
+                week={w}
+                from={addDays(last, -27)}
+                to={last}
+                histStaff={staffFor(addDays(last, -27), 28)}
+                fcStaff={staffFor(w, 7)}
+                initialTab={screen === 'forecast-storico' ? 'storico' : screen === 'forecast-carica' ? 'carica' : screen === 'forecast-imp' ? 'imp' : null}
+              />
+            );
+          })()
+        ) : screen === 'report' ? (
           (() => {
             const month = '2026-10';
             const dates = Array.from({ length: 31 }, (_, i) => `2026-10-${String(i + 1).padStart(2, '0')}`);
@@ -236,6 +292,7 @@ export default function DevPreview({ screen }: { screen: string }) {
             snapMinutes={15}
             serverKey={`${view}${date}${to}`}
             navigate={(d, v, t) => { setDate(d); setView(v); setTo(t); }}
+            forecast={fc ? { ...fc, phoneIds: ['tel'] } : null}
             onHistory={async () => [{ at: '2026-10-22T08:45:00Z', actor: 'Carlo Carrabino', action: 'update', before: { starts_at: '2026-11-04T08:00:00Z', ends_at: '2026-11-04T16:00:00Z', activity_id: 'tel' }, after: { starts_at: '2026-11-04T08:00:00Z', ends_at: '2026-11-04T17:00:00Z', activity_id: 'chat' } }]}
             onTimeOff={async () => ({ ok: true, message: 'Assenza inserita (anteprima)' })}
             onSwap={async (p) => (p.force ? { ok: true, message: 'Applicato (anteprima)' } : { ok: false, error: 'Marco: solo 10h00 di riposo prima del turno di 11/11 alle 08:00 (minimo 11 h)' })}
