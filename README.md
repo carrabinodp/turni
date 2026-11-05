@@ -7,7 +7,8 @@ Sito interno per pianificare turni e attività del team, in stile "staffing time
 - **Login con Google aziendale**: chi entra con l'email del dominio ottiene il profilo in automatico; se era già nel file importato, viene collegato ai suoi turni.
 - **Scambi, cessioni in bacheca, ferie e permessi** con approvazione di un manager (basta uno dei tre). Il manager può anche inserirli direttamente col clic destro sulla giornata.
 - **Tipo di giornata** (Ufficio, Smart working, …) con colore di sfondo, dalla timeline o dai colori dell’Excel. I colori abbinati all’import vengono ricordati.
-- **Pause**: inserimento rapido e regole automatiche configurabili.
+- **Pause automatiche**: 15 min ogni 2 ore di lavoro continuativo, sfalsate di 5 min tra gli operatori, e pranzo di 1 ora dopo 4 ore nei turni da 8+ ore (tutto configurabile).
+- **Scambi**: l'operatore vede i turni compatibili dei colleghi (stesso giorno o scambio di riposo tra giorni diversi); ufficio/smart seguono il turno; il riposo minimo viene segnalato e il manager può approvare comunque.
 - **Controllo del riposo minimo** (11 h, configurabile) sul server: uno scambio che lo viola non passa.
 - **Bozza / pubblicata** per settimana: i dipendenti vedono solo le settimane pubblicate.
 - **Notifiche** in-app, email e push (anche su iPhone con il sito aggiunto alla schermata Home).
@@ -24,7 +25,7 @@ Stack: Next.js 14 · Supabase (Postgres, Auth, RLS) · Vercel.
 
 ### 1. Supabase
 1. Crea un progetto su <https://supabase.com> scegliendo la regione **Central EU (Frankfurt)**.
-2. **SQL Editor** → incolla ed esegui `supabase/migrations/0001_init.sql`, poi `0002_giornate_pause.sql` e `0003_team_calendario.sql` (in quest'ordine, una volta sola ciascuno).
+2. **SQL Editor** → incolla ed esegui `supabase/migrations/0001_init.sql`, poi `0002_giornate_pause.sql`, `0003_team_calendario.sql` e `0004_scambi_pause.sql` (in quest'ordine, una volta sola ciascuno).
 3. Apri `supabase/setup.sql`, metti il tuo dominio e la tua email, ed eseguilo.
 4. **Project Settings → API**: copia `Project URL`, `anon key` e `service_role key`.
 

@@ -154,6 +154,27 @@ export default function DevPreview({ screen }: { screen: string }) {
                 colleagues={[]}
                 absences={ACTS.filter((a) => a.kind === 'absence')}
                 calendarConnected={false}
+                swapDays={Object.keys(days).filter((d) => d >= today).sort()}
+                reviewers={[{ id: 'p0', name: 'Carlo Carrabino' }, { id: 'p1', name: 'Andrea Pettineo' }]}
+                swapSearch={async (dayA) => {
+                  const iso = (d: string, h: string) => new Date(localToUtc(d, h, TZ)).toISOString();
+                  const bl = (d: string, s0: string, e0: string, main: string, color: string) => [
+                    { s: iso(d, s0), e: iso(d, e0), name: main, color, kind: 'work' },
+                    { s: iso(d, '11:00'), e: iso(d, '11:15'), name: 'Pausa', color: '#a9d3ea', kind: 'break' },
+                    { s: iso(d, '13:00'), e: iso(d, '14:00'), name: 'Pranzo', color: '#f6e7a6', kind: 'break' },
+                  ];
+                  const next = addDays(dayA, 1);
+                  return {
+                    ok: true,
+                    mine: { blocks: bl(dayA, '09:00', '18:00', 'Telefono', '#483d73'), day_type: 'Smart working', day_color: '#fff27a' },
+                    candidates: [
+                      { person_id: 'p6', full_name: 'Adriana Bianca Cardigliano', day: dayA, starts_at: iso(dayA, '11:00'), ends_at: iso(dayA, '20:00'), mode: 'same_day', day_type: 'Ufficio', day_color: '#e3ecff', blocks: bl(dayA, '11:00', '20:00', 'Telefono', '#483d73'), issues: [] },
+                      { person_id: 'p7', full_name: 'Annamaria Ferlisi', day: dayA, starts_at: iso(dayA, '08:30'), ends_at: iso(dayA, '17:30'), mode: 'same_day', day_type: 'Smart working', day_color: '#fff27a', blocks: bl(dayA, '08:30', '17:30', 'REC', '#a33a2e'), issues: [] },
+                      { person_id: 'p8', full_name: 'Chiara Bellandi', day: next, starts_at: iso(next, '09:00'), ends_at: iso(next, '18:00'), mode: 'rest_swap', day_type: 'Ufficio', day_color: '#e3ecff', blocks: bl(next, '09:00', '18:00', 'Chat', '#2e6e9e'), issues: [] },
+                      { person_id: 'p9', full_name: 'Luca Marinacci', day: dayA, starts_at: iso(dayA, '14:00'), ends_at: iso(dayA, '20:00'), mode: 'same_day', day_type: null, day_color: null, blocks: [{ s: iso(dayA, '14:00'), e: iso(dayA, '20:00'), name: 'Telefono', color: '#483d73', kind: 'work' }], issues: ['Luca Marinacci: solo 10h00 di riposo prima del turno di 06/11 alle 08:00 (minimo 11 h)'] },
+                    ],
+                  };
+                }}
               />
             );
           })()
@@ -165,8 +186,9 @@ export default function DevPreview({ screen }: { screen: string }) {
               activities={ACTS}
               dayTypes={DT}
               savedColors={[{ fill: 'BF4F14', target: 'activity', activity_id: 'riun', day_type_id: null }]}
-              breakRules={[]}
+              breakPolicy={null}
               breakActivityId="pausa"
+              lunchActivityId="pranzo"
               tz={TZ}
               onImport={async (p) => ({ ok: true, inserted: p.rows.length, deleted: 0, people_created: p.people_create.length, marks: p.marks.length, published: [] })}
             />

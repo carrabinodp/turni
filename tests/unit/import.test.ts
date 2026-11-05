@@ -192,26 +192,30 @@ test('cognome da solo collegato al nome completo', () => {
   assert.equal(matchPerson('Rossi', null, people).status, 'fuzzy', 'cognome condiviso: da confermare');
 });
 
-test('pause automatiche', async () => {
-  const { autoBreaks, DEFAULT_RULES } = await import('../../src/lib/breaks');
+test('pause automatiche: 15 min ogni 2 ore, sfalsate di 5 min, pranzo dopo 4 ore', async () => {
+  const { planBreaks, DEFAULT_POLICY } = await import('../../src/lib/breaks');
   const t = (h: number, m = 0) => Date.UTC(2026, 10, 10, h, m);
+  const hm = (ms: number) => new Date(ms).toISOString().slice(11, 16);
+  const w = (person_id: string, s: number, e: number) => ({ person_id, s, e, kind: 'work' as const });
   const blocks = [
-    { person_id: 'a', s: t(8), e: t(17), kind: 'work' as const },
-    { person_id: 'a', s: t(12), e: t(13), kind: 'break' as const },   // pranzo già presente
-    { person_id: 'b', s: t(9), e: t(13), kind: 'work' as const },     // 4h: niente pause
-    { person_id: 'c', s: t(9), e: t(18), kind: 'work' as const },
-    { person_id: 'c', s: t(10), e: t(10, 15), kind: 'break' as const }, // pausa vicina alla regola: non duplicare
-    { person_id: 'd', s: t(9), e: t(18), kind: 'work' as const },
-    { person_id: 'd', s: t(9), e: t(18), kind: 'absence' as const },  // in ferie
+    w('a', t(9), t(18)), // full time 9-18
+    w('b', t(9), t(18)), // stessa ora: sfalsata di 5 min
+    w('c', t(9), t(15)), // 6 ore: niente pranzo
+    w('d', t(9), t(13)), // 4 ore
+    w('e', t(9), t(18)),
+    { person_id: 'e', s: t(9), e: t(18), kind: 'absence' as const }, // in ferie
+    w('f', t(8), t(17)),
+    { person_id: 'f', s: t(12), e: t(13), kind: 'break' as const }, // pranzo già presente
   ];
-  const out = autoBreaks(blocks, DEFAULT_RULES);
-  const a = out.filter((x) => x.person_id === 'a').map((x) => new Date(x.s).toISOString().slice(11, 16));
-  assert.deepEqual(a, ['10:00', '14:45']);
-  assert.equal(out.filter((x) => x.person_id === 'b').length, 0);
-  assert.deepEqual(out.filter((x) => x.person_id === 'c').map((x) => new Date(x.s).toISOString().slice(11, 16)), ['15:45']);
-  assert.equal(out.filter((x) => x.person_id === 'd').length, 0);
+  const out = planBreaks(blocks, DEFAULT_POLICY, ['a', 'b', 'c', 'd', 'e', 'f']);
+  const of = (id: string) => out.filter((x) => x.person_id === id).sort((x, y) => x.s - y.s).map((x) => `${x.type === 'lunch' ? 'P' : 'p'}${hm(x.s)}-${hm(x.e)}`);
+  assert.deepEqual(of('a'), ['p11:00-11:15', 'P13:00-14:00', 'p16:00-16:15']);
+  assert.deepEqual(of('b'), ['p10:55-11:10', 'P13:00-14:00', 'p15:55-16:10']);
+  assert.deepEqual(of('c'), ['p10:50-11:05', 'p13:05-13:20']);
+  assert.deepEqual(of('d'), ['p10:45-11:00']);
+  assert.deepEqual(of('e'), []);
+  assert.deepEqual(of('f'), ['p10:00-10:15', 'p15:00-15:15']);
 });
-
 test('token del calendario cifrato e decifrabile', async () => {
   process.env.CALENDAR_TOKEN_KEY = 'chiave-di-prova';
   const { encrypt, decrypt } = await import('../../src/lib/gcal');

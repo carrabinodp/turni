@@ -95,25 +95,35 @@ export async function saveDayType(d: DayTypeInput): Promise<R> {
   return { ok: true, message: 'Tipo di giornata salvato' };
 }
 
-export interface BreakRuleInput {
-  min_shift_hours: number;
-  from: 'start' | 'end';
-  offset_minutes: number;
-  duration_minutes: number;
+export interface BreakPolicyInput {
+  interval_minutes: number;
+  break_minutes: number;
+  stagger_minutes: number;
+  stagger_slots: number;
+  min_tail_minutes: number;
+  lunch_min_shift_hours: number;
+  lunch_after_hours: number;
+  lunch_minutes: number;
 }
 
-export async function saveBreakRules(rules: BreakRuleInput[], activityId: string | null): Promise<R> {
+export async function saveBreakPolicy(p: BreakPolicyInput, breakActivity: string | null, lunchActivity: string | null): Promise<R> {
   const { supabase, isAdmin } = await requireManager();
   if (!isAdmin) return { ok: false, error: 'Solo l’amministratore può cambiare le regole' };
-  const clean = rules
-    .filter((r) => r.duration_minutes > 0)
-    .map((r) => ({
-      min_shift_hours: Math.max(0, Math.min(24, Number(r.min_shift_hours))),
-      from: r.from === 'end' ? 'end' : 'start',
-      offset_minutes: Math.max(0, Math.min(720, Math.round(Number(r.offset_minutes)))),
-      duration_minutes: Math.max(1, Math.min(120, Math.round(Number(r.duration_minutes)))),
-    }));
-  const { error } = await supabase.from('settings').update({ break_rules: clean, break_activity_id: activityId }).eq('id', 1);
+  const n = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(Number(v) * 100) / 100));
+  const clean = {
+    interval_minutes: n(p.interval_minutes, 15, 600),
+    break_minutes: n(p.break_minutes, 0, 120),
+    stagger_minutes: n(p.stagger_minutes, 0, 60),
+    stagger_slots: n(p.stagger_slots, 1, 30),
+    min_tail_minutes: n(p.min_tail_minutes, 0, 120),
+    lunch_min_shift_hours: n(p.lunch_min_shift_hours, 0, 24),
+    lunch_after_hours: n(p.lunch_after_hours, 0, 12),
+    lunch_minutes: n(p.lunch_minutes, 0, 180),
+  };
+  const { error } = await supabase
+    .from('settings')
+    .update({ break_policy: clean, break_activity_id: breakActivity, lunch_activity_id: lunchActivity })
+    .eq('id', 1);
   if (error) return { ok: false, error: error.message };
   revalidatePath('/', 'layout');
   return { ok: true, message: 'Regole delle pause salvate' };

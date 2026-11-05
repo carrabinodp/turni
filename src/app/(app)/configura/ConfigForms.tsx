@@ -2,8 +2,8 @@
 import { useState } from 'react';
 import { useAction } from '@/components/ui';
 import { KIND_LABEL, type Activity, type ActivityKind, type DayType, type Settings } from '@/lib/types';
-import { DEFAULT_RULES } from '@/lib/breaks';
-import { saveActivity, saveBreakRules, saveDayType, saveSettings, type ActivityInput, type BreakRuleInput, type DayTypeInput } from './actions';
+import { policyLabel, withDefaults } from '@/lib/breaks';
+import { saveActivity, saveBreakPolicy, saveDayType, saveSettings, type ActivityInput, type BreakPolicyInput, type DayTypeInput } from './actions';
 
 const toInput = (a: Activity): ActivityInput => ({
   id: a.id, name: a.name, color: a.color, kind: a.kind, aliases: a.aliases.join(', '),
@@ -144,47 +144,59 @@ function DayTypeRow({ initial }: { initial: DayTypeInput }) {
 }
 
 function BreakRulesForm({ settings, activities, isAdmin }: { settings: Settings; activities: Activity[]; isAdmin: boolean }) {
-  const [rules, setRules] = useState<BreakRuleInput[]>(settings.break_rules?.length ? settings.break_rules : DEFAULT_RULES);
+  const [p, setP] = useState<BreakPolicyInput>(withDefaults(settings.break_policy));
   const breaks = activities.filter((a) => a.kind === 'break' && !a.archived);
   const [act, setAct] = useState(settings.break_activity_id ?? breaks[0]?.id ?? '');
+  const [lunch, setLunch] = useState(settings.lunch_activity_id ?? breaks.find((a) => /pranzo/i.test(a.name))?.id ?? '');
   const { run, busy } = useAction();
-  const set = (i: number, patch: Partial<BreakRuleInput>) => setRules(rules.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const num = (k: keyof BreakPolicyInput, step = 1, w = 74) => (
+    <input id={`bp-${k}`} className="input" type="number" min={0} step={step} value={p[k]} style={{ width: w }} onChange={(e) => setP({ ...p, [k]: Number(e.target.value) })} />
+  );
   return (
     <section className="card">
       <div className="card-head">
         <h2>Pause automatiche</h2>
-        <span className="small muted">Usate dal pulsante “Pause automatiche” in timeline e dall’import. Una pausa non viene aggiunta se ce n’è già una vicina.</span>
+        <span className="small muted">{policyLabel(withDefaults(p))}</span>
       </div>
-      <form className="card-body" onSubmit={(e) => { e.preventDefault(); run(() => saveBreakRules(rules, act || null)); }}>
-        <fieldset disabled={!isAdmin || busy} style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 10 }}>
-          <label className="field" style={{ maxWidth: 260 }}>
-            <span>Attività usata per le pause</span>
-            <select id="br-act" className="select" value={act} onChange={(e) => setAct(e.target.value)}>
-              {!breaks.length && <option value="">Crea prima un’attività di tipo Pausa</option>}
-              {breaks.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
-          </label>
-          {rules.map((r, i) => (
-            <div key={i} className="row" style={{ alignItems: 'center' }}>
-              <span>Nei turni di almeno</span>
-              <input id={`br-min-${i}`} className="input" type="number" min={0} max={24} step={0.5} value={r.min_shift_hours} onChange={(e) => set(i, { min_shift_hours: Number(e.target.value) })} style={{ width: 70 }} />
-              <span>ore, una pausa di</span>
-              <input id={`br-dur-${i}`} className="input" type="number" min={1} max={120} value={r.duration_minutes} onChange={(e) => set(i, { duration_minutes: Number(e.target.value) })} style={{ width: 70 }} />
-              <span>min</span>
-              <input id={`br-off-${i}`} className="input" type="number" min={0} max={12} step={0.25} value={r.offset_minutes / 60} onChange={(e) => set(i, { offset_minutes: Math.round(Number(e.target.value) * 60) })} style={{ width: 70 }} />
-              <select id={`br-from-${i}`} className="select" value={r.from} onChange={(e) => set(i, { from: e.target.value as 'start' | 'end' })}>
-                <option value="start">ore dopo l’inizio</option>
-                <option value="end">ore prima della fine</option>
+      <form className="card-body" onSubmit={(e) => { e.preventDefault(); run(() => saveBreakPolicy(p, act || null, lunch || null)); }}>
+        <fieldset disabled={!isAdmin || busy} style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 12 }}>
+          <div className="row" style={{ alignItems: 'center' }}>
+            <b style={{ width: 120 }}>Pausa breve</b>
+            {num('break_minutes')}<span>min ogni</span>{num('interval_minutes', 5)}<span>min di lavoro continuativo</span>
+          </div>
+          <div className="row" style={{ alignItems: 'center' }}>
+            <b style={{ width: 120 }}>Sfalsamento</b>
+            {num('stagger_minutes')}<span>min tra un operatore e l’altro, su</span>{num('stagger_slots')}<span>posizioni (poi si ricomincia)</span>
+          </div>
+          <div className="row" style={{ alignItems: 'center' }}>
+            <b style={{ width: 120 }}>Pranzo</b>
+            {num('lunch_minutes', 5)}<span>min dopo</span>{num('lunch_after_hours', 0.5)}<span>ore dall’inizio, nei turni di almeno</span>{num('lunch_min_shift_hours', 0.5)}<span>ore</span>
+          </div>
+          <div className="row" style={{ alignItems: 'center' }}>
+            <b style={{ width: 120 }}>Margine</b>
+            <span>nessuna pausa negli ultimi</span>{num('min_tail_minutes', 5)}<span>min del turno</span>
+          </div>
+          <div className="row">
+            <label className="field">
+              <span>Attività per le pause</span>
+              <select id="bp-act" className="select" value={act} onChange={(e) => setAct(e.target.value)}>
+                {!breaks.length && <option value="">Crea prima un’attività di tipo Pausa</option>}
+                {breaks.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
               </select>
-              <button type="button" className="btn btn-sm btn-ghost btn-danger" onClick={() => setRules(rules.filter((_, j) => j !== i))}>Togli</button>
-            </div>
-          ))}
-          {isAdmin && (
-            <div className="row">
-              <button type="button" className="btn btn-sm" onClick={() => setRules([...rules, { min_shift_hours: 6, from: 'start', offset_minutes: 120, duration_minutes: 15 }])}>+ Aggiungi regola</button>
-              <button className="btn btn-primary">Salva regole</button>
-            </div>
-          )}
+            </label>
+            <label className="field">
+              <span>Attività per il pranzo</span>
+              <select id="bp-lunch" className="select" value={lunch} onChange={(e) => setLunch(e.target.value)}>
+                <option value="">Come le pause</option>
+                {breaks.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            </label>
+          </div>
+          <p className="small muted" style={{ margin: 0 }}>
+            Lo sfalsamento anticipa la prima pausa di ogni tratto (mai oltre l’intervallo), così chi inizia alla stessa ora non va in pausa insieme.
+            Le pause si inseriscono all’import e col pulsante “Pause automatiche” in timeline, che ricalcola quelle del periodo visibile.
+          </p>
+          {isAdmin && <div><button className="btn btn-primary">Salva regole</button></div>}
         </fieldset>
       </form>
     </section>

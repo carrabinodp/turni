@@ -24,16 +24,19 @@ function done(message: string): Res {
   return { ok: true, message };
 }
 
-export async function createSwap(dayA: string, target: string, dayB: string, note: string): Promise<Res> {
+export async function createSwap(dayA: string, target: string, dayB: string, note: string, reviewer: string | null = null): Promise<Res> {
   const { supabase, me } = await getSession();
   const { data, error } = await supabase.rpc('request_create', {
-    p_kind: 'swap', p_target: target, p_day_a: dayA, p_day_b: dayB, p_note: note || null,
+    p_kind: 'swap', p_target: target, p_day_a: dayA, p_day_b: dayB, p_note: note || null, p_reviewer: reviewer,
   });
   if (error) return { ok: false, error: error.message };
   const r = data as RequestRow;
   await notify([r.target_id], {
     title: `${firstName(me.full_name)} ti propone uno scambio`,
-    body: `Il suo turno di ${fmtDay(dayA, 'EEEE d MMM')} con il tuo di ${fmtDay(dayB, 'EEEE d MMM')}.${note ? `\n“${note}”` : ''}`,
+    body:
+      dayA === dayB
+        ? `Il suo turno di ${fmtDay(dayA, 'EEEE d MMM')} con il tuo dello stesso giorno.${note ? `\n“${note}”` : ''}`
+        : `Scambio di riposo: tu lavoreresti ${fmtDay(dayA, 'EEEE d MMM')} al suo posto e riposeresti ${fmtDay(dayB, 'EEEE d MMM')}.${note ? `\n“${note}”` : ''}`,
     url: '/richieste',
   });
   return done('Richiesta inviata al collega');
@@ -91,7 +94,8 @@ export async function respond(id: string, accept: boolean): Promise<Res> {
     url: '/richieste',
   });
   if (accept) {
-    await notify((await managerIds()).filter((x) => x !== me.id), {
+    const reviewer = (r as RequestRow & { reviewer_id?: string | null }).reviewer_id;
+    await notify((reviewer ? [reviewer] : await managerIds()).filter((x) => x !== me.id), {
       title: 'Scambio turni da approvare',
       body: `${await nameOf(supabase, r.requester_id)} ↔ ${me.full_name}`,
       url: '/richieste',
@@ -127,9 +131,9 @@ export async function cancel(id: string): Promise<Res> {
   return done('Richiesta annullata');
 }
 
-export async function decide(id: string, approve: boolean, note: string): Promise<Res> {
+export async function decide(id: string, approve: boolean, note: string, force = false): Promise<Res> {
   const { supabase, me } = await getSession();
-  const { data, error } = await supabase.rpc('request_decide', { p_id: id, p_approve: approve, p_note: note || null });
+  const { data, error } = await supabase.rpc('request_decide', { p_id: id, p_approve: approve, p_note: note || null, p_force: force });
   if (error) return { ok: false, error: error.message };
   const r = data as RequestRow;
   const outcome = approve ? 'approvat' : 'rifiutat';
@@ -172,5 +176,55 @@ export async function decideMany(ids: string[], approve: boolean, note: string):
   return {
     ok: true,
     message: `${ok} ${approve ? 'approvate' : 'rifiutate'}${errors.length ? `, ${errors.length} non gestite (es. ${errors[0]})` : ''}`,
+  };
+}
+
+export interface SwapBlock { s: string; e: string; name: string; color: string; kind: string }
+export interface SwapCandidate {
+  person_id: string;
+  full_name: string;
+  day: string;
+  starts_at: string;
+  ends_at: string;
+  mode: 'same_day' | 'rest_swap';
+  day_type: string | null;
+  day_color: string | null;
+  blocks: SwapBlock[];
+  issues: string[];
+}
+export type SwapSearch =
+  | { ok: true; mine: { blocks: SwapBlock[]; day_type: string | null; day_color: string | null }; candidates: SwapCandidate[] }
+  | { ok: false; error: string };
+
+/** Turni dei colleghi compatibili con il mio turno del giorno dayA */
+export async function swapCandidatesAction(dayA: string, from: string, to: string): Promise<SwapSearch> {
+  const { supabase, me, tz } = await getSession();
+  const { data, error } = await supabase.rpc('swap_candidates', { p_day_a: dayA, p_from: from, p_to: to });
+  if (error) return { ok: false, error: error.message };
+  const { dayStart, addDays } = await import('@/lib/time');
+  const [{ data: ev }, { data: acts }, { data: mk }] = await Promise.all([
+    supabase
+      .from('events')
+      .select('starts_at, ends_at, activity_id')
+      .eq('person_id', me.id)
+      .gte('starts_at', new Date(dayStart(dayA, tz)).toISOString())
+      .lt('starts_at', new Date(dayStart(addDays(dayA, 1), tz)).toISOString())
+      .order('starts_at'),
+    supabase.from('activity_types').select('id, name, color, kind'),
+    supabase.from('day_marks').select('day_types(name, color)').eq('person_id', me.id).eq('day', dayA).maybeSingle(),
+  ]);
+  const act = new Map((acts ?? []).map((a) => [a.id as string, a]));
+  const dt = (mk as { day_types?: { name: string; color: string } | null } | null)?.day_types ?? null;
+  return {
+    ok: true,
+    mine: {
+      blocks: (ev ?? []).map((e) => {
+        const a = act.get(e.activity_id as string);
+        return { s: e.starts_at as string, e: e.ends_at as string, name: (a?.name as string) ?? '', color: (a?.color as string) ?? '#999999', kind: (a?.kind as string) ?? 'work' };
+      }),
+      day_type: dt?.name ?? null,
+      day_color: dt?.color ?? null,
+    },
+    candidates: (data ?? []) as SwapCandidate[],
   };
 }

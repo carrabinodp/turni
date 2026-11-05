@@ -3,7 +3,7 @@ import './timeline.css';
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { Activity, ActivityKind, DayMark, DayType, EventRow, Person } from '@/lib/types';
-import { autoBreaks, DEFAULT_RULES, type BreakRule } from '@/lib/breaks';
+import { planBreaks, policyLabel, withDefaults, type BreakPolicy } from '@/lib/breaks';
 import { AbsenceDialog, SwapDialog, type AbsenceInput, type SwapInput } from './ManagerDialogs';
 import { EditEventPopover, InsertEventPopover, type Draft, type HistoryRow } from './EventPopover';
 import {
@@ -46,8 +46,9 @@ export interface TimelineProps {
   dayTypes?: DayType[];
   marks?: DayMark[];
   publishedWeeks: string[];
-  breakRules?: BreakRule[];
+  breakPolicy?: Partial<BreakPolicy> | null;
   breakActivityId?: string | null;
+  lunchActivityId?: string | null;
   canEdit: boolean;
   meId: string;
   snapMinutes: number;
@@ -189,6 +190,8 @@ export default function Timeline(props: TimelineProps) {
   const dayTypes = useMemo(() => (props.dayTypes ?? []).filter((d) => !d.archived), [props.dayTypes]);
   const dtById = useMemo(() => new Map((props.dayTypes ?? []).map((d) => [d.id, d])), [props.dayTypes]);
   const breakAct = props.breakActivityId ?? usable.find((a) => a.kind === 'break')?.id ?? null;
+  const lunchAct = props.lunchActivityId ?? usable.find((a) => a.kind === 'break' && /pranzo|lunch/i.test(a.name))?.id ?? breakAct;
+  const policy = useMemo(() => withDefaults(props.breakPolicy), [props.breakPolicy]);
 
   /* ---- stato eventi con annulla/ripeti ---- */
   const [evs, setEvs] = useState<Ev[]>(() => props.events.map(toEv));
@@ -649,15 +652,27 @@ export default function Timeline(props: TimelineProps) {
   const blocksFor = (list: Ev[]) =>
     list.map((e) => ({ person_id: e.person_id, s: e.s, e: e.e, kind: actById.get(e.activity_id)?.kind ?? ('work' as const) }));
 
-  const addAutoBreaks = (filter: (e: Ev) => boolean, label: string) => {
+  /** ricalcola pause e pranzi dei turni nel perimetro: quelle esistenti vengono sostituite */
+  const addAutoBreaks = (filter: (e: Ev) => boolean, label: string, ask = true) => {
     if (!breakAct) return say('Manca un’attività di tipo pausa: creala in Configura', true);
+    const isBreak = (e: Ev) => actById.get(e.activity_id)?.kind === 'break';
     const scope = evsRef.current.filter(filter);
-    const created = autoBreaks(blocksFor(scope), props.breakRules?.length ? props.breakRules : DEFAULT_RULES, Math.min(snapMinutes, 5)).map(
-      (b) => ({ id: uuid(), person_id: b.person_id, activity_id: breakAct, s: b.s, e: b.e, note: null, version: null }),
-    );
-    if (!created.length) return say(`Nessuna pausa da aggiungere ${label}: ci sono già o i turni sono brevi`);
-    commit([...evsRef.current, ...created]);
-    say(`Aggiunte ${created.length} pause ${label}. Puoi spostarle e poi salvare.`);
+    const old = scope.filter(isBreak);
+    if (ask && old.length && !window.confirm(`Ricalcolo pause e pranzi ${label}. Le ${old.length} pause già presenti verranno sostituite. Procedo?`)) return;
+    const oldIds = new Set(old.map((e) => e.id));
+    const order = [...people].sort((a, b) => a.full_name.localeCompare(b.full_name)).map((p) => p.id);
+    const created = planBreaks(blocksFor(scope.filter((e) => !oldIds.has(e.id))), policy, order, Math.min(snapMinutes, 5)).map((b) => ({
+      id: uuid(),
+      person_id: b.person_id,
+      activity_id: b.type === 'lunch' ? lunchAct ?? breakAct : breakAct,
+      s: b.s,
+      e: b.e,
+      note: null,
+      version: null,
+    }));
+    if (!created.length && !old.length) return say(`Nessuna pausa da aggiungere ${label}`);
+    commit([...evsRef.current.filter((e) => !oldIds.has(e.id)), ...created]);
+    say(`${created.length} pause e pranzi ${label}. Controlla e poi salva.`);
   };
 
   const addBreakAt = (person: string, t: number, minutes = 15) => {
@@ -908,7 +923,7 @@ export default function Timeline(props: TimelineProps) {
               </>
             )}
             {canEdit && (
-              <button className="btn btn-sm" disabled={busy} onClick={() => addAutoBreaks((e) => e.e > startMs && e.s < endMs, 'nel periodo visibile')} title="Aggiunge le pause previste dalle regole a tutti i turni visibili">
+              <button className="btn btn-sm" disabled={busy} onClick={() => addAutoBreaks((e) => e.e > startMs && e.s < endMs, 'nel periodo visibile')} title={`Ricalcola pause e pranzi dei turni visibili: ${policyLabel(policy)}`}>
                 Pause automatiche
               </button>
             )}

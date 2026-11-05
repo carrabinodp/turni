@@ -54,7 +54,10 @@ export function describeRequest(
   if (r.kind === 'swap') {
     const a = shifts.get(`${r.requester_id}|${r.day_a}`) ?? shifts.get(`${r.target_id}|${r.day_a}`);
     const b = shifts.get(`${r.target_id}|${r.day_b}`) ?? shifts.get(`${r.requester_id}|${r.day_b}`);
-    return `${n(r.requester_id)} dà ${fmtDay(r.day_a!, 'EEE d MMM')} (${shiftText(a, tz)}) a ${n(r.target_id)} e prende ${fmtDay(r.day_b!, 'EEE d MMM')} (${shiftText(b, tz)})`;
+    if (r.day_a !== r.day_b) {
+      return `Scambio di riposo: ${n(r.requester_id)} dà ${fmtDay(r.day_a!, 'EEE d MMM')} (${shiftText(a, tz)}) a ${n(r.target_id)} e lavora ${fmtDay(r.day_b!, 'EEE d MMM')} (${shiftText(b, tz)}) al suo posto`;
+    }
+    return `${n(r.requester_id)} dà ${fmtDay(r.day_a!, 'EEE d MMM')} (${shiftText(a, tz)}) a ${n(r.target_id)} e prende il suo (${shiftText(b, tz)})`;
   }
   if (r.kind === 'give') {
     const a = shifts.get(`${r.requester_id}|${r.day_a}`) ?? shifts.get(`${r.target_id}|${r.day_a}`);

@@ -90,15 +90,13 @@ do $$
 declare m uuid := (select id from people where email = 'marco.bianchi@azienda.it');
 begin
   assert (select count(*) from events) = 7, 'pubblicata: visibile';
-  begin
-    perform request_create('swap', m, '2026-11-12', '2026-11-11');
-    raise exception 'doveva fallire per riposo';
-  exception when others then
-    assert sqlerrm like '%riposo%', 'messaggio: ' || sqlerrm;
-  end;
+  -- scambio che viola il riposo: ora viene creato e segnalato al manager
+  perform request_create('swap', m, '2026-11-12', '2026-11-11');
+  assert cardinality(request_preview((select id from requests where day_b = '2026-11-11'))) > 0, 'violazione segnalata';
+  perform request_cancel((select id from requests where day_b = '2026-11-11'));
   -- scambio valido: Gio di Giulia <-> Ven di Marco
   perform request_create('swap', m, '2026-11-12', '2026-11-13', p_note => 'Visita medica');
-  assert (select status from requests) = 'pending_peer';
+  assert (select status from requests where status <> 'cancelled') = 'pending_peer';
   -- seconda richiesta sullo stesso turno: bloccata
   begin
     perform request_create('give', null, '2026-11-12');
@@ -108,6 +106,7 @@ begin
   end;
 end $$;
 reset role;
+delete from requests where status = 'cancelled';
 
 -- ---- Marco accetta
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);
@@ -148,13 +147,9 @@ select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b
 set role authenticated;
 do $$ begin
   assert (select count(*) from requests where status = 'open') = 1, 'Marco vede la bacheca';
-  -- Marco lavora mercoledì 08:00: martedì 14-22 lascerebbe 10h di riposo
-  begin
-    perform request_take((select id from requests where status = 'open'));
-    raise exception 'doveva fallire';
-  exception when others then
-    assert sqlerrm like '%riposo%', sqlerrm;
-  end;
+  -- Marco lavora mercoledì 08:00: martedì 14-22 lascerebbe 10h di riposo → segnalato, non bloccato
+  perform request_take((select id from requests where status = 'open'));
+  assert cardinality(request_preview((select id from requests where kind = 'give'))) > 0, 'riposo segnalato';
 end $$;
 reset role;
 
@@ -328,6 +323,81 @@ set role authenticated;
 do $$ begin
   perform request_decide((select id from requests where kind::text = 'change'), true, 'Ok');
   assert (select status from requests where kind::text = 'change') = 'approved', 'modifica approvata';
+end $$;
+reset role;
+
+-- ---- 0004: scambi con ufficio/smart, scambio di riposo, candidati, forza
+reset role;
+select set_config('app.bulk', 'on', false);
+-- settimana pubblicata 30/11–6/12: Giulia lun ufficio / mar riposo / mer smart; Marco lun smart / mar ufficio / mer riposo
+insert into schedule_weeks (week_start) values ('2026-12-07') on conflict do nothing;
+insert into events (person_id, activity_id, starts_at, ends_at)
+select p.id, (select id from activity_types where name = 'Telefono'), x.s::timestamptz, x.e::timestamptz
+from (values
+  ('giulia.rossi@azienda.it', '2026-12-07 09:00+01', '2026-12-07 18:00+01'),
+  ('giulia.rossi@azienda.it', '2026-12-09 09:00+01', '2026-12-09 18:00+01'),
+  ('marco.bianchi@azienda.it', '2026-12-07 10:00+01', '2026-12-07 19:00+01'),
+  ('marco.bianchi@azienda.it', '2026-12-08 09:00+01', '2026-12-08 18:00+01'),
+  ('giulia.rossi@azienda.it', '2026-12-10 04:00+01', '2026-12-10 12:00+01')
+) x(em, s, e) join people p on p.email = x.em;
+insert into day_marks (person_id, day, day_type_id)
+select p.id, x.d::date, (select id from day_types where name = x.t)
+from (values
+  ('giulia.rossi@azienda.it', '2026-12-07', 'Ufficio'),
+  ('giulia.rossi@azienda.it', '2026-12-09', 'Smart working'),
+  ('marco.bianchi@azienda.it', '2026-12-07', 'Smart working'),
+  ('marco.bianchi@azienda.it', '2026-12-08', 'Ufficio')
+) x(em, d, t) join people p on p.email = x.em;
+select set_config('app.bulk', 'off', false);
+
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+set role authenticated;
+do $$
+declare m uuid := (select id from people where email = 'marco.bianchi@azienda.it');
+begin
+  -- candidati per il mercoledì di Giulia: Marco martedì (scambio di riposo); lunedì no (Giulia lavora)
+  assert exists (select 1 from swap_candidates('2026-12-09', '2026-12-07', '2026-12-13') where person_id = m and day = '2026-12-08' and mode = 'rest_swap' and day_type = 'Ufficio'), 'scambio di riposo proposto';
+  assert not exists (select 1 from swap_candidates('2026-12-09', '2026-12-07', '2026-12-13') where day = '2026-12-07'), 'giorno in cui lavoro già escluso';
+  -- candidati per il lunedì: Marco lunedì (stesso giorno)
+  assert exists (select 1 from swap_candidates('2026-12-07', '2026-12-07', '2026-12-07') where person_id = m and mode = 'same_day' and day_type = 'Smart working'), 'stesso giorno';
+  perform request_create('swap', m, '2026-12-09', '2026-12-08', p_note => 'Riposo mercoledì, lavoro martedì');
+  perform request_create('swap', m, '2026-12-07', '2026-12-07');
+  perform request_create('give', m, '2026-12-10', p_note => 'Mi serve il giovedì');
+end $$;
+reset role;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);
+set role authenticated;
+select request_respond(id, true) from requests where day_a in ('2026-12-09', '2026-12-07', '2026-12-10') and status = 'pending_peer';
+reset role;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000c', false);
+set role authenticated;
+do $$
+declare g uuid := (select id from people where email = 'giulia.rossi@azienda.it');
+        m uuid := (select id from people where email = 'marco.bianchi@azienda.it');
+        sw uuid := (select id from day_types where name = 'Smart working');
+        uf uuid := (select id from day_types where name = 'Ufficio');
+begin
+  perform request_decide((select id from requests where day_a = '2026-12-09' and kind = 'swap'), true);
+  -- doppio passaggio: Giulia ora lavora martedì (in ufficio, come era Marco) e riposa mercoledì
+  assert (select person_id from events where starts_at = '2026-12-08 09:00+01') = g, 'Giulia prende il martedì';
+  assert (select person_id from events where starts_at = '2026-12-09 09:00+01') = m, 'Marco prende il mercoledì';
+  assert (select day_type_id from day_marks where person_id = g and day = '2026-12-08') = uf, 'martedì in ufficio segue il turno';
+  assert (select day_type_id from day_marks where person_id = m and day = '2026-12-09') = sw, 'mercoledì in smart segue il turno';
+  assert not exists (select 1 from day_marks where person_id = g and day = '2026-12-09'), 'Giulia a riposo mercoledì';
+  -- stesso giorno: chi era in smart prende il turno in ufficio e viceversa
+  perform request_decide((select id from requests where day_a = '2026-12-07' and kind = 'swap'), true);
+  assert (select day_type_id from day_marks where person_id = g and day = '2026-12-07') = sw, 'Giulia ora smart';
+  assert (select day_type_id from day_marks where person_id = m and day = '2026-12-07') = uf, 'Marco ora ufficio';
+  -- approvazione forzata di una richiesta che viola il riposo
+  begin
+    perform request_decide((select id from requests where day_a = '2026-12-10'), true);
+    raise exception 'doveva bloccare';
+  exception when others then
+    assert sqlerrm like '%riposo%', sqlerrm;
+  end;
+  perform request_decide((select id from requests where day_a = '2026-12-10'), true, 'Ok eccezionale', true);
+  assert (select person_id from events where starts_at = '2026-12-10 04:00+01') = m, 'turno ceduto';
+  assert (select status from requests where kind = 'give' and decision_note = 'Ok eccezionale') = 'approved', 'forzata';
 end $$;
 reset role;
 

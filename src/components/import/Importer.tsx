@@ -2,7 +2,7 @@
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import type { Activity, ActivityKind, DayType } from '@/lib/types';
-import { autoBreaks, DEFAULT_RULES, type Block, type BreakRule } from '@/lib/breaks';
+import { planBreaks, policyLabel, withDefaults, type Block, type BreakPolicy } from '@/lib/breaks';
 import { KIND_LABEL } from '@/lib/types';
 import {
   columnLabels, serialToDate, detect, detectGrid, detectGridCols, detectLegend, detectList, parse, plain,
@@ -62,8 +62,9 @@ export default function Importer(props: {
   activities: Activity[];
   dayTypes: DayType[];
   savedColors: SavedColor[];
-  breakRules: BreakRule[];
+  breakPolicy: Partial<BreakPolicy> | null;
   breakActivityId: string | null;
+  lunchActivityId: string | null;
   tz: string;
   onImport: (p: ImportPayload) => Promise<ImportResult>;
 }) {
@@ -83,7 +84,8 @@ export default function Importer(props: {
   const [defaultAct, setDefaultAct] = useState(props.activities.find((a) => a.kind === 'work' && !a.archived)?.id ?? '');
   const [replace, setReplace] = useState(true);
   const [publish, setPublish] = useState(false);
-  const [withBreaks, setWithBreaks] = useState(false);
+  const [withBreaks, setWithBreaks] = useState(true);
+  const policy = withDefaults(props.breakPolicy);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<(ImportResult & { ok: true }) | null>(null);
@@ -330,8 +332,16 @@ export default function Importer(props: {
     }
     if (withBreaks && props.breakActivityId) {
       const pOf = new Map(blocks.map((b) => [b.person_id, b.p]));
-      for (const br of autoBreaks(blocks, props.breakRules.length ? props.breakRules : DEFAULT_RULES)) {
-        pay.rows.push({ ...pOf.get(br.person_id)!, activity_id: props.breakActivityId, starts_at: new Date(br.s).toISOString(), ends_at: new Date(br.e).toISOString() });
+      const order = Array.from(new Set(blocks.map((b) => b.person_id))).sort((a, b) =>
+        (persons.find((x) => x.key === a.replace(/^k:/, ''))?.name ?? a).localeCompare(persons.find((x) => x.key === b.replace(/^k:/, ''))?.name ?? b),
+      );
+      for (const br of planBreaks(blocks, policy, order)) {
+        pay.rows.push({
+          ...pOf.get(br.person_id)!,
+          activity_id: br.type === 'lunch' ? props.lunchActivityId ?? props.breakActivityId : props.breakActivityId,
+          starts_at: new Date(br.s).toISOString(),
+          ends_at: new Date(br.e).toISOString(),
+        });
       }
     }
     if (!pay.rows.length) {
@@ -621,7 +631,7 @@ export default function Importer(props: {
               </label>
               <label className="check">
                 <input id="imp-breaks" type="checkbox" checked={withBreaks} disabled={!props.breakActivityId} onChange={(e) => setWithBreaks(e.target.checked)} />
-                Aggiungi le pause automatiche ({(props.breakRules.length ? props.breakRules : DEFAULT_RULES).map((r) => `${r.duration_minutes} min ${r.from === 'start' ? 'dopo' : 'prima della fine di'} ${r.offset_minutes / 60}h`).join(', ')})
+                Inserisci pause e pranzi in automatico ({policyLabel(policy)})
               </label>
               {error && <div className="alert alert-bad">{error}</div>}
               <div className="row">

@@ -40,7 +40,7 @@ export default async function MyCalendarPage({ searchParams }: { searchParams: {
       .lt('starts_at', new Date(dayStart(qTo, tz)).toISOString())
       .limit(20000),
     supabase.from('activity_types').select('*').order('sort_order'),
-    supabase.from('people').select('id, full_name, user_id').eq('active', true).order('full_name'),
+    supabase.from('people').select('id, full_name, user_id, role').eq('active', true).order('full_name'),
     supabase.from('requests').select('*').in('status', ['pending_peer', 'open', 'pending_manager']),
     supabase.from('schedule_weeks').select('week_start').gte('week_start', weekStart(qFrom)).lt('week_start', qTo),
     supabase.from('day_types').select('id, name, color'),
@@ -110,6 +110,11 @@ export default async function MyCalendarPage({ searchParams }: { searchParams: {
       colleagues={colleagues}
       absences={activities.filter((a) => a.kind === 'absence' && a.requestable && !a.archived)}
       calendarConnected={!!calStatus}
+      swapDays={Array.from(shifts.values())
+        .filter((sh) => sh.person_id === me.id && Number.isFinite(sh.start) && sh.day >= today && published.has(weekStart(sh.day)) && !busyDay(me.id, sh.day))
+        .map((sh) => sh.day)
+        .sort()}
+      reviewers={(people ?? []).filter((p) => p.role !== 'agent' && p.user_id && p.id !== me.id).map((p) => ({ id: p.id as string, name: p.full_name as string }))}
     />
   );
 }

@@ -9,6 +9,7 @@ import { ROLE_LABEL, type Activity, type Role } from '@/lib/types';
 import TimeOffForm from '../assenze/TimeOffForm';
 import { createChange } from '../richieste/actions';
 import { SwapDialog, type Colleague } from './MyShifts';
+import SwapPanel from './SwapPanel';
 
 export interface CalEvent {
   id: string;
@@ -45,6 +46,9 @@ export default function MyCalendar(props: {
   colleagues: Colleague[];
   absences: Activity[];
   calendarConnected: boolean;
+  swapDays: string[];
+  reviewers: { id: string; name: string }[];
+  swapSearch?: Parameters<typeof SwapPanel>[0]['search'];
 }) {
   const { view, date, tz, today } = props;
   const router = useRouter();
@@ -103,7 +107,9 @@ export default function MyCalendar(props: {
         </div>
         <div className="row" style={{ alignItems: 'center' }}>
           <button className="btn" onClick={() => setDialog({ kind: 'timeoff' })}>Tempo libero</button>
-          <button className="btn" onClick={() => setDialog({ kind: 'swap' })}>Richiesta di scambio di turno</button>
+          <button className="btn" onClick={() => setDialog({ kind: 'swap' })} disabled={!props.swapDays.length} title={props.swapDays.length ? undefined : 'Nessun turno pubblicato da scambiare'}>
+            Richiesta di scambio di turno
+          </button>
           <Link className="btn" href="/impostazioni#calendario">
             {props.calendarConnected ? '✓ Google Calendar' : 'Visualizza in Google Calendar'}
           </Link>
@@ -256,19 +262,23 @@ export default function MyCalendar(props: {
         </div>
       )}
 
-      {(dialog?.kind === 'swap' || dialog?.kind === 'give') && dialog.day && (
+      {dialog?.kind === 'give' && dialog.day && (
         <SwapDialog
-          mode={dialog.kind}
+          mode="give"
           day={dialog.day}
           myText={props.days[dialog.day]?.text ?? ''}
           colleagues={props.colleagues}
           onClose={() => setDialog(null)}
         />
       )}
-      {dialog?.kind === 'swap' && !dialog.day && (
-        <PickDay
-          days={Object.entries(props.days).filter(([, v]) => v.canAct && !v.pending).map(([d, v]) => ({ d, text: v.text })).sort((a, b) => a.d.localeCompare(b.d))}
-          onPick={(d) => setDialog({ kind: 'swap', day: d })}
+      {dialog?.kind === 'swap' && (dialog.day || props.swapDays[0]) && (
+        <SwapPanel
+          tz={tz}
+          today={today}
+          initialDay={dialog.day ?? props.swapDays.find((d) => d >= date) ?? props.swapDays[0]!}
+          myDays={props.swapDays}
+          reviewers={props.reviewers}
+          search={props.swapSearch}
           onClose={() => setDialog(null)}
         />
       )}
@@ -330,31 +340,6 @@ function NowLine({ tz, h0, h1 }: { tz: string; h0: number; h1: number }) {
   const h = Number(t.slice(0, 2)) + Number(t.slice(3)) / 60;
   if (h < h0 || h > h1) return null;
   return <div className="cal-now" style={{ top: (h - h0) * HOUR_PX }} suppressHydrationWarning />;
-}
-
-function PickDay(props: { days: { d: string; text: string }[]; onPick: (d: string) => void; onClose: () => void }) {
-  return (
-    <div className="dlg-back" onClick={props.onClose}>
-      <div className="dlg" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Scegli il turno">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2>Quale turno vuoi scambiare?</h2>
-          <button className="btn btn-icon btn-ghost btn-sm" aria-label="Chiudi" onClick={props.onClose}><IcClose /></button>
-        </div>
-        {props.days.length ? (
-          <div className="opts">
-            {props.days.map((x) => (
-              <button key={x.d} className="opt" onClick={() => props.onPick(x.d)}>
-                <span style={{ textTransform: 'capitalize' }}>{fmtDay(x.d, 'EEEE d MMM')}</span>
-                <b className="tabnum">{x.text}</b>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <div className="muted">Non hai turni pubblicati da scambiare in questo periodo. Cambia settimana o mese e riprova.</div>
-        )}
-      </div>
-    </div>
-  );
 }
 
 function ChangeDialog({ day, today, onClose }: { day: string; today: string; onClose: () => void }) {

@@ -150,9 +150,20 @@ export default function RequestsTable({ rows, tz }: { rows: ReqRow[]; tz: string
                     {r.status === 'pending_manager' && (
                       <div className="row" style={{ flexWrap: 'nowrap' }}>
                         <button className="btn btn-sm btn-danger" disabled={busy} onClick={() => run(() => decide(r.id, false, ''))}>Rifiuta</button>
-                        <button className="btn btn-sm btn-primary" disabled={busy || r.issues.length > 0} title={r.issues.length ? 'Non approvabile: viola le regole' : undefined} onClick={() => run(() => decide(r.id, true, ''))}>
-                          Approva
-                        </button>
+                        {r.issues.length > 0 ? (
+                          <button
+                            className="btn btn-sm"
+                            disabled={busy}
+                            title="Viola il riposo minimo: approvi sotto la tua responsabilità"
+                            onClick={() => window.confirm(`Questa richiesta non rispetta il riposo minimo:\n\n${r.issues.join('\n')}\n\nApprovare comunque?`) && run(() => decide(r.id, true, '', true))}
+                          >
+                            Approva comunque
+                          </button>
+                        ) : (
+                          <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => run(() => decide(r.id, true, ''))}>
+                            Approva
+                          </button>
+                        )}
                       </div>
                     )}
                   </td>

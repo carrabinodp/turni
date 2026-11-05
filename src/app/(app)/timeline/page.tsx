@@ -2,7 +2,6 @@ import { getSession } from '@/lib/session';
 import Timeline from '@/components/timeline/Timeline';
 import { addDays, dayStart, diffDays, isValidDate, todayIn, weekStart } from '@/lib/time';
 import type { Activity, DayMark, DayType, EventRow, Person } from '@/lib/types';
-import type { BreakRule } from '@/lib/breaks';
 import { copyWeekAction, eventHistoryAction, managerSwapAction, managerTimeOffAction, publishWeekAction, saveScheduleAction } from './actions';
 
 export const dynamic = 'force-dynamic';
@@ -54,8 +53,9 @@ export default async function TimelinePage({ searchParams }: { searchParams: { d
       dayTypes={(dayTypes.data ?? []) as DayType[]}
       marks={mk}
       publishedWeeks={pub}
-      breakRules={(settings.break_rules ?? undefined) as BreakRule[] | undefined}
+      breakPolicy={settings.break_policy ?? null}
       breakActivityId={settings.break_activity_id ?? null}
+      lunchActivityId={settings.lunch_activity_id ?? null}
       canEdit={isManager}
       meId={me.id}
       snapMinutes={settings.snap_minutes}

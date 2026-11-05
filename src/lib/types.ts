@@ -20,6 +20,8 @@ export interface Settings {
   snap_minutes: number;
   break_rules?: { min_shift_hours: number; from: 'start' | 'end'; offset_minutes: number; duration_minutes: number }[];
   break_activity_id?: string | null;
+  break_policy?: Partial<import('./breaks').BreakPolicy> | null;
+  lunch_activity_id?: string | null;
 }
 
 export interface Person {

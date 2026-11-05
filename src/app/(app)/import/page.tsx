@@ -1,7 +1,6 @@
 import { requireManager } from '@/lib/session';
 import Importer from '@/components/import/Importer';
 import type { Activity, DayType } from '@/lib/types';
-import type { BreakRule } from '@/lib/breaks';
 import type { SavedColor } from '@/components/import/Importer';
 import type { PersonLite } from '@/lib/import/match';
 import { importAction } from './actions';
@@ -32,8 +31,9 @@ export default async function ImportPage() {
         activities={(activities.data ?? []) as Activity[]}
         dayTypes={(dayTypes.data ?? []) as DayType[]}
         savedColors={(colors.data ?? []) as SavedColor[]}
-        breakRules={(settings.break_rules ?? []) as BreakRule[]}
+        breakPolicy={settings.break_policy ?? null}
         breakActivityId={settings.break_activity_id ?? null}
+        lunchActivityId={settings.lunch_activity_id ?? null}
         tz={tz}
         onImport={importAction}
       />
