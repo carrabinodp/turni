@@ -27,7 +27,17 @@ export interface GenPerson {
   shiftHours: number; // durata del turno, pausa pranzo compresa (9 = 8 ore + pranzo)
   daysPerWeek: number;
   canWeekend: boolean;
+  /** giorni in ufficio a settimana (vuoto = regola generale; 5 = mai in smart) */
+  officeDays?: number | null;
+  /** ora di ingresso più tarda possibile (es. 09:30) */
+  maxStart?: string | null;
+  /** turno fisso: giorni (1 = lun … 7 = dom) e orario */
+  fixed?: { days: number[]; start: string; end: string } | null;
+  /** settimana con il weekend: giorni totali, quanti feriali lunghi, ore dei feriali corti */
+  weekendWeek?: { days: number; longDays: number; shortHours: number } | null;
 }
+
+export type PersonRule = Pick<GenPerson, 'officeDays' | 'maxStart' | 'fixed' | 'weekendWeek'>;
 
 export interface RecEntry { person_id: string; start: string; end: string }
 export interface Companion { when: string; person_id: string; start: string; end: string }
@@ -45,6 +55,8 @@ export interface GenConfig {
   maxSaturdaysPerMonth: number;
   activities: { phone: string | null; rec: string | null; reclami: string | null; sunday?: string | null };
   dayTypes: { office: string | null; remote: string | null };
+  /** regole particolari per persona */
+  personRules?: Record<string, PersonRule>;
   /** assegnazioni scelte a mano per settimana (lunedì → persona) */
   weekRoles?: Record<string, { rec?: string | null; reclami?: string | null }>;
 }
@@ -257,11 +269,20 @@ export function generate(input: {
     /* --- weekend: domenica e sabato --- */
     const weekendPicked = new Map<string, string[]>(); // persona → giorni weekend
     const sundays = free.filter((d) => isoDow(d) === 7 || (isHoliday(d) && isoDow(d) <= 6));
+    const fixedOn = (p: GenPerson, d: string) => !!p.fixed && p.fixed.days.includes(isoDow(d));
+    const pushFixedWeekend = (d: string) =>
+      people
+        .filter((p) => fixedOn(p, d) && available(p.id, d))
+        .map((p) => {
+          weekShifts.push({ person_id: p.id, day: d, start: toMin(p.fixed!.start), end: toMin(p.fixed!.end), role: 'op', office: false });
+          weekendPicked.set(p.id, [...(weekendPicked.get(p.id) ?? []), d]);
+          return p;
+        }).length;
     for (const d of sundays) {
       if (!c.sunday.enabled) continue;
-      const n = c.sunday.people;
+      const n = Math.max(0, c.sunday.people - pushFixedWeekend(d));
       const cand = people
-        .filter((p) => p.canWeekend && available(p.id, d) && p.id !== recPerson && p.id !== reclPerson)
+        .filter((p) => p.canWeekend && !p.fixed && available(p.id, d) && p.id !== recPerson && p.id !== reclPerson)
         .sort((a, b) => get(cnt.sun, a.id) - get(cnt.sun, b.id) || b.shiftHours - a.shiftHours || rand() - 0.5);
       const chosen = cand.slice(0, n);
       if (chosen.length < n) issues.push({ day: d, level: 'bad', text: `Domenica/festivo: ${chosen.length} persone su ${n}` });
@@ -275,7 +296,7 @@ export function generate(input: {
     if (sat && c.saturday.enabled) {
       const S = c.saturday;
       const cand = people
-        .filter((p) => p.canWeekend && available(p.id, sat) && (S.people > 0) && !(weekendPicked.get(p.id)?.length) && p.id !== recPerson && p.id !== reclPerson && (satThisMonth.get(p.id) ?? 0) < c.maxSaturdaysPerMonth)
+        .filter((p) => p.canWeekend && !p.fixed && available(p.id, sat) && (S.people > 0) && !(weekendPicked.get(p.id)?.length) && p.id !== recPerson && p.id !== reclPerson && (satThisMonth.get(p.id) ?? 0) < c.maxSaturdaysPerMonth)
         .sort((a, b) => get(cnt.sat, a.id) - get(cnt.sat, b.id) || rand() - 0.5);
       const satOpen = toMin(S.open), satClose = toMin(S.close);
       const T10 = toMin('10:00'), T14 = toMin('14:00'), T18 = toMin('18:00');
@@ -288,18 +309,19 @@ export function generate(input: {
         const pmNeed = Math.max(0, S.afternoon - longs - closers);
         return amNeed + pmNeed <= shorts;
       };
-      let chosen = cand.slice(0, S.people);
-      let k = S.people;
-      while (!feasible(chosen) && k < Math.min(S.maxPeople, cand.length)) chosen = cand.slice(0, ++k);
+      const fixedSat = pushFixedWeekend(sat);
+      let chosen = cand.slice(0, Math.max(0, S.people - fixedSat));
+      let k = chosen.length;
+      while (!feasible(chosen) && k < Math.min(S.maxPeople - fixedSat, cand.length)) chosen = cand.slice(0, ++k);
       if (!feasible(chosen)) {
         // sostituisci i turni corti con turni lunghi (i meno usati il sabato)
         const longs = cand.filter((p) => p.shiftHours >= 8 && !chosen.includes(p));
         for (let i = chosen.length - 1; i >= 0 && !feasible(chosen) && longs.length; i--) if (chosen[i]!.shiftHours < 8) chosen[i] = longs.shift()!;
       }
-      if (chosen.length < S.people) issues.push({ day: sat, level: 'bad', text: `Sabato: ${chosen.length} persone su ${S.people}` });
+      if (chosen.length + fixedSat < S.people) issues.push({ day: sat, level: 'bad', text: `Sabato: ${chosen.length + fixedSat} persone su ${S.people}` });
       const plan: GenShift[] = [];
       const byLen = [...chosen].sort((a, b) => b.shiftHours - a.shiftHours);
-      const closers = byLen.filter((p) => !rulesFor(prefsOf.get(p.id) ?? [], sat).noClose).slice(0, Math.max(1, S.closeMin));
+      const closers = byLen.filter((p) => !rulesFor(prefsOf.get(p.id) ?? [], sat).noClose && !(p.maxStart && satClose - p.shiftHours * 60 > toMin(p.maxStart))).slice(0, Math.max(1, S.closeMin));
       closers.forEach((p) => plan.push({ person_id: p.id, day: sat, start: satClose - p.shiftHours * 60, end: satClose, role: 'op', office: false }));
       const covAm = () => plan.filter((s) => s.start <= T10 && s.end > T10).length;
       const covPm = () => plan.filter((s) => s.start <= T14 && s.end >= T18).length;
@@ -333,13 +355,19 @@ export function generate(input: {
     // chi lavora nel weekend riposa nei giorni feriali; i riposi si distribuiscono sui giorni più "larghi"
     const restCount = new Map<string, number>(wdFree.map((d) => [d, 0]));
     const workdays = new Map<string, string[]>(); // persona → giorni feriali di lavoro
+    const hoursOn = new Map<string, number>(); // durata del turno diversa dal solito in un giorno
     const orderPeople = [...people].sort((a, b) => (weekendPicked.get(b.id)?.length ?? 0) - (weekendPicked.get(a.id)?.length ?? 0) || rand() - 0.5);
     const weekdayHolidays = days.filter((d) => isoDow(d) <= 5 && isHoliday(d)).length;
     for (const p of orderPeople) {
       const fixedDays = days.filter((d) => !inMonth(d) && fixedKey.has(`${p.id}|${d}`)).length;
       const weekendDays = weekendPicked.get(p.id)?.length ?? 0;
-      const avail = wdFree.filter((d) => available(p.id, d));
-      const need = Math.min(avail.length, Math.max(0, p.daysPerWeek - weekendDays - fixedDays - weekdayHolidays));
+      const avail = wdFree.filter((d) => available(p.id, d) && (!p.fixed || p.fixed.days.includes(isoDow(d))));
+      if (p.fixed) {
+        workdays.set(p.id, avail);
+        continue;
+      }
+      const perWeek = weekendDays && p.weekendWeek ? p.weekendWeek.days : p.daysPerWeek;
+      const need = Math.min(avail.length, Math.max(0, perWeek - weekendDays - fixedDays - weekdayHolidays));
       const pickedDays = [...avail];
       while (pickedDays.length > need) {
         // riposa nel giorno in cui riposano meno persone (il lunedì, con più chiamate, per ultimo)
@@ -348,11 +376,18 @@ export function generate(input: {
         restCount.set(d, (restCount.get(d) ?? 0) + 1);
       }
       workdays.set(p.id, pickedDays);
+      // settimana con il weekend "lunga": alcuni feriali lunghi, gli altri corti
+      if (weekendDays && p.weekendWeek) {
+        pickedDays.sort().forEach((d, i) => {
+          if (i >= p.weekendWeek!.longDays) hoursOn.set(`${p.id}|${d}`, p.weekendWeek!.shortHours);
+        });
+      }
     }
 
     /* --- turni feriali --- */
     for (const d of wdFree) {
       const working = people.filter((p) => workdays.get(p.id)?.includes(d));
+      const L = (p: GenPerson) => (hoursOn.get(`${p.id}|${d}`) ?? p.shiftHours) * 60;
       const rules = new Map(working.map((p) => [p.id, rulesFor(prefsOf.get(p.id) ?? [], d)]));
       const dayShifts: GenShift[] = [];
       // REC del giorno: quello della settimana o, se assente, un altro del gruppo
@@ -368,7 +403,7 @@ export function generate(input: {
         if (comp && working.some((p) => p.id === comp.person_id)) {
           const cp = byId.get(comp.person_id)!;
           const end = toMin(comp.end);
-          dayShifts.push({ person_id: cp.id, day: d, start: end - cp.shiftHours * 60, end, role: 'companion', sub: [toMin(comp.start), end], office: false });
+          dayShifts.push({ person_id: cp.id, day: d, start: end - L(cp), end, role: 'companion', sub: [toMin(comp.start), end], office: false });
         }
       }
       let recl = reclPerson && working.some((p) => p.id === reclPerson) ? reclPerson : null;
@@ -378,23 +413,25 @@ export function generate(input: {
       if (recl) taken.add(recl);
       const ops = working.filter((p) => !taken.has(p.id));
 
-      // turni imposti dalle preferenze ("turno preciso")
+      // turni fissi e turni imposti dalle preferenze ("turno preciso")
       for (const p of ops) {
         const r = rules.get(p.id)!;
-        if (r.shift) {
-          dayShifts.push({ person_id: p.id, day: d, start: r.shift[0], end: r.shift[1], role: 'op', office: false });
+        const fx: [number, number] | null = r.shift ?? (p.fixed ? [toMin(p.fixed.start), toMin(p.fixed.end)] : null);
+        if (fx) {
+          dayShifts.push({ person_id: p.id, day: d, start: fx[0], end: fx[1], role: 'op', office: false });
           taken.add(p.id);
         }
       }
       const pool = () => ops.filter((p) => !taken.has(p.id));
       const fits = (p: GenPerson, start: number, end: number) => {
         const r = rules.get(p.id)!;
+        if (p.maxStart && start > toMin(p.maxStart)) return false;
         if (r.startAfter !== null && start < r.startAfter) return false;
         if (r.endBy !== null && end > r.endBy) return false;
         return true;
       };
       const assign = (p: GenPerson, start: number) => {
-        const s: GenShift = { person_id: p.id, day: d, start, end: start + p.shiftHours * 60, role: 'op', office: false };
+        const s: GenShift = { person_id: p.id, day: d, start, end: start + L(p), role: 'op', office: false };
         dayShifts.push(s);
         taken.add(p.id);
         return s;
@@ -404,13 +441,13 @@ export function generate(input: {
       // 1. chiusure
       let closers = 0;
       for (let i = 0; i < W.closeOps; i++) {
-        const cand = pool().filter((p) => !rules.get(p.id)!.noClose && fits(p, closeM - p.shiftHours * 60, closeM));
+        const cand = pool().filter((p) => !rules.get(p.id)!.noClose && fits(p, closeM - L(p), closeM));
         const ok = cand.filter((p) => closesThisWeek(p.id) < W.maxClosePerWeek);
         const list = (ok.length ? ok : cand).sort((a, b) => get(cnt.close, a.id) + noise() - (get(cnt.close, b.id) + noise()));
         const p = list[0];
         if (!p) break;
         if (!ok.length) issues.push({ day: d, person_id: p.id, level: 'warn', text: `${p.name}: seconda chiusura della settimana` });
-        const s = assign(p, closeM - p.shiftHours * 60);
+        const s = assign(p, closeM - L(p));
         weekShifts.push(s);
         inc(cnt.close, p.id);
         closers++;
@@ -421,7 +458,7 @@ export function generate(input: {
       let openers = 0;
       for (let i = 0; i < W.openOps; i++) {
         const cand = pool()
-          .filter((p) => !rules.get(p.id)!.noOpen && fits(p, openM, openM + p.shiftHours * 60))
+          .filter((p) => !rules.get(p.id)!.noOpen && fits(p, openM, openM + L(p)))
           .sort((a, b) => get(cnt.open, a.id) + noise() - (get(cnt.open, b.id) + noise()));
         const p = cand[0];
         if (!p) break;
@@ -439,11 +476,11 @@ export function generate(input: {
       for (const [end, n] of lateNeeds) {
         for (let i = 0; i < n; i++) {
           const cand = pool()
-            .filter((p) => fits(p, end - p.shiftHours * 60, end) && end - p.shiftHours * 60 >= openM)
-            .sort((a, b) => b.shiftHours - a.shiftHours || get(cnt.late, a.id) + noise() - (get(cnt.late, b.id) + noise()));
+            .filter((p) => fits(p, end - L(p), end) && end - L(p) >= openM)
+            .sort((a, b) => L(b) - L(a) || get(cnt.late, a.id) + noise() - (get(cnt.late, b.id) + noise()));
           const p = cand[0];
           if (!p) break;
-          assign(p, end - p.shiftHours * 60);
+          assign(p, end - L(p));
           inc(cnt.late, p.id);
         }
       }
@@ -452,9 +489,10 @@ export function generate(input: {
       for (const p of pool()) {
         const r = rules.get(p.id)!;
         let start = toMin('09:00');
+        if (p.maxStart) start = Math.min(start, toMin(p.maxStart));
         if (r.startAfter !== null) start = Math.max(start, r.startAfter);
-        if (r.endBy !== null && start + p.shiftHours * 60 > r.endBy) start = Math.max(openM, r.endBy - p.shiftHours * 60);
-        if (start + p.shiftHours * 60 > closeM) start = closeM - p.shiftHours * 60;
+        if (r.endBy !== null && start + L(p) > r.endBy) start = Math.max(openM, r.endBy - L(p));
+        if (start + L(p) > closeM) start = closeM - L(p);
         assign(p, start);
       }
 
@@ -464,9 +502,9 @@ export function generate(input: {
         const r = rulesFor(prefsOf.get(recl) ?? [], d);
         const opensWeek = weekShifts.filter((s) => s.person_id === recl && s.role === 'reclami' && s.start === openM).length;
         const closesWeek = weekShifts.filter((s) => s.person_id === recl && s.role === 'reclami' && s.end === closeM).length;
-        const close = !r.noClose && (r.noOpen || closesWeek <= opensWeek);
-        const start = close ? closeM - rp.shiftHours * 60 : openM;
-        const s: GenShift = { person_id: recl, day: d, start, end: start + rp.shiftHours * 60, role: 'reclami', office: false };
+        const close = !r.noClose && !(rp.maxStart && closeM - L(rp) > toMin(rp.maxStart)) && (r.noOpen || closesWeek <= opensWeek);
+        const start = close ? closeM - L(rp) : openM;
+        const s: GenShift = { person_id: recl, day: d, start, end: start + L(rp), role: 'reclami', office: false };
         dayShifts.push(s);
       }
 
@@ -478,7 +516,7 @@ export function generate(input: {
     const quota = new Map<string, number>();
     people.forEach((p) => {
       const n = new Set(wdShifts.filter((s) => s.person_id === p.id).map((s) => s.day)).size;
-      quota.set(p.id, Math.min(c.officeDaysPerWeek, n));
+      quota.set(p.id, Math.min(p.officeDays ?? c.officeDaysPerWeek, n));
     });
     wdShifts.filter((s) => s.office).forEach((s) => quota.set(s.person_id, (quota.get(s.person_id) ?? 0) - 1));
     const setOffice = (s: GenShift) => {
@@ -533,7 +571,8 @@ export function generate(input: {
       const canWork = days.filter((d) =>
         inMonth(d) ? (isoDow(d) <= 5 && !isHoliday(d) && available(p.id, d)) || weekShifts.some((x) => x.person_id === p.id && x.day === d && (isoDow(d) >= 6 || isHoliday(d))) : fixedKey.has(`${p.id}|${d}`),
       ).length;
-      const expected = Math.min(p.daysPerWeek - weekdayHolidays, canWork);
+      const perWeek = p.fixed ? p.fixed.days.length : weekendPicked.get(p.id)?.length && p.weekendWeek ? p.weekendWeek.days : p.daysPerWeek;
+      const expected = Math.min(perWeek - weekdayHolidays, canWork);
       if (free.length === 7 && worked < expected) issues.push({ day: null, person_id: p.id, level: 'warn', text: `${p.name}: ${worked} giorni nella settimana del ${w.slice(8)}/${w.slice(5, 7)} invece di ${expected}` });
     }
 

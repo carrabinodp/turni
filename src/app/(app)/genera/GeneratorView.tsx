@@ -64,9 +64,10 @@ export default function GeneratorView(props: {
         .filter((p) => !p.gen_exclude)
         .map((p) => {
           const s = props.suggest[p.id];
-          return { id: p.id, name: p.name, shiftHours: p.shift_hours ?? s?.shiftHours ?? 9, daysPerWeek: p.days_per_week ?? s?.daysPerWeek ?? 5, canWeekend: p.can_weekend };
+          const r = props.config.personRules?.[p.id] ?? {};
+          return { id: p.id, name: p.name, shiftHours: p.shift_hours ?? s?.shiftHours ?? 9, daysPerWeek: p.days_per_week ?? s?.daysPerWeek ?? 5, canWeekend: p.can_weekend, ...r };
         }),
-    [props.people, props.suggest],
+    [props.people, props.suggest, props.config.personRules],
   );
   const missingProfile = props.people.filter((p) => !p.gen_exclude && (p.shift_hours === null || p.days_per_week === null));
   const nameOf = useMemo(() => new Map(props.people.map((p) => [p.id, p.name])), [props.people]);
@@ -160,7 +161,7 @@ export default function GeneratorView(props: {
       </div>
 
       {tab === 'regole' && <RulesForm config={props.config} people={props.people} activities={props.activities} dayTypes={props.dayTypes} officeDaysPerWeek={props.officeDaysPerWeek} />}
-      {tab === 'persone' && <PeopleForm people={props.people} suggest={props.suggest} />}
+      {tab === 'persone' && <PeopleForm people={props.people} suggest={props.suggest} config={props.config} />}
       {tab === 'preferenze' && <PrefsPanel month={month} people={props.people} prefs={props.prefs} absences={props.absences} />}
 
       {tab === 'genera' && (

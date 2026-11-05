@@ -119,6 +119,11 @@ export default function DevPreview({ screen }: { screen: string }) {
               rec: { pool: [{ person_id: id('Bellandi'), start: '08:30', end: '17:30' }, { person_id: id('Ferlisi'), start: '08:30', end: '17:30' }, { person_id: id('Ceraolo'), start: '08:30', end: '17:30' }, { person_id: id('Martorana'), start: '08:30', end: '14:30' }], companions: [{ when: id('Martorana'), person_id: id('Totaro'), start: '14:30', end: '18:30' }], saturday: false },
               reclami: { pool: [id('Bellandi'), id('Morise')] },
               activities: { phone: 'tel', rec: 'mail', reclami: 'form' },
+              personRules: {
+                [id('Pertile')]: { fixed: { days: [1, 2, 3, 4], start: '09:00', end: '14:00' } },
+                [id('Gennari')]: { weekendWeek: { days: 6, longDays: 1, shortHours: 6 } },
+                [id('Carnevale')]: { officeDays: 5 },
+              },
             });
             return (
               <GeneratorView

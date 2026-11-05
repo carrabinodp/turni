@@ -128,3 +128,32 @@ test('profilo dallo storico', () => {
   assert.deepEqual([p.get('a')!.shiftHours, p.get('a')!.daysPerWeek], [9, 5]);
   assert.deepEqual([p.get('b')!.shiftHours, p.get('b')!.daysPerWeek], [6, 5]);
 });
+
+test('regole particolari: ingresso massimo, ufficio, turno fisso, settimana lunga, mai smart', () => {
+  const team: GenPerson[] = [
+    ...people.filter((p) => !['f10', 'f11', 'f12', 'f13'].includes(p.id)),
+    { id: 'van', name: 'Vanessa', shiftHours: 9, daysPerWeek: 5, canWeekend: true, officeDays: 2, maxStart: '09:30' },
+    { id: 'bar', name: 'Barbara', shiftHours: 5, daysPerWeek: 4, canWeekend: true, fixed: { days: [1, 2, 3, 4], start: '09:00', end: '14:00' } },
+    { id: 'fra', name: 'Francesca', shiftHours: 9, daysPerWeek: 5, canWeekend: true, weekendWeek: { days: 6, longDays: 1, shortHours: 6 } },
+    { id: 'vin', name: 'Vincenzo', shiftHours: 9, daysPerWeek: 5, canWeekend: false, officeDays: 5 },
+  ];
+  const r = generate({ month: '2027-02', people: team, config, prefs: [], absences: [], fixed: [], history: empty });
+  const of = (id: string) => r.shifts.filter((s) => s.person_id === id);
+  assert.ok(of('van').every((s) => s.start <= toMin('09:30')), 'Vanessa entra entro le 9:30');
+  assert.ok(of('bar').every((s) => isoWeekday(s.day) <= 4 && s.start === toMin('09:00') && s.end === toMin('14:00')), 'Barbara fissa lun–gio 9–14');
+  assert.equal(of('bar').filter((s) => s.day >= '2027-02-01' && s.day <= '2027-02-07').length, 4);
+  assert.ok(of('vin').every((s) => isoWeekday(s.day) <= 5 && s.office), 'Vincenzo: niente weekend, sempre in ufficio');
+  // settimane piene
+  for (const w of ['2027-02-01', '2027-02-08', '2027-02-15', '2027-02-22']) {
+    const wk = (id: string) => of(id).filter((s) => s.day >= w && s.day <= `2027-02-${String(Number(w.slice(8)) + 6).padStart(2, '0')}`);
+    assert.equal(wk('van').filter((s) => s.office).length, 2, `Vanessa 2 in ufficio (${w})`);
+    const f = wk('fra');
+    if (f.some((s) => isoWeekday(s.day) >= 6)) {
+      assert.equal(f.length, 6, `Francesca 6 giorni nella settimana del weekend (${w})`);
+      const weekdays = f.filter((s) => isoWeekday(s.day) <= 5).map((s) => (s.end - s.start) / 60).sort();
+      assert.deepEqual(weekdays, [6, 6, 6, 6, 9]);
+      assert.equal((f.find((s) => isoWeekday(s.day) >= 6)!.end - f.find((s) => isoWeekday(s.day) >= 6)!.start) / 60, isoWeekday(f.find((s) => isoWeekday(s.day) >= 6)!.day) === 7 ? 8 : 9);
+    } else assert.equal(f.length, 5);
+  }
+  assert.ok(of('fra').some((s) => isoWeekday(s.day) >= 6), 'Francesca fa almeno un weekend nel mese');
+});
