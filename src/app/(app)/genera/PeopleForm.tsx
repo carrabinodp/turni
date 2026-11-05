@@ -14,6 +14,7 @@ export function ruleSummary(r: PersonRule | undefined, canWeekend: boolean): str
   if (r.fixed) out.push(`fisso ${r.fixed.days.map((d) => WD[d - 1]).join('-')} ${r.fixed.start}–${r.fixed.end}`);
   if (r.officeDays !== null && r.officeDays !== undefined) out.push(r.officeDays >= 5 ? 'mai in smart' : `${r.officeDays} gg in ufficio`);
   if (r.maxStart) out.push(`entra entro le ${r.maxStart}`);
+  if (r.otherSite) out.push('altra sede');
   if (r.weekendWeek) out.push(`con weekend: ${r.weekendWeek.days} giorni (${r.weekendWeek.longDays} lungo, altri da ${r.weekendWeek.shortHours} h)`);
   if (!canWeekend) out.push('niente weekend');
   return out;
@@ -38,6 +39,7 @@ export default function PeopleForm({ people, suggest, config }: { people: GPerso
       if (r.maxStart) x.maxStart = r.maxStart;
       if (r.fixed && r.fixed.days.length && r.fixed.start && r.fixed.end) x.fixed = r.fixed;
       if (r.weekendWeek) x.weekendWeek = r.weekendWeek;
+      if (r.otherSite) x.otherSite = true;
       if (Object.keys(x).length) clean[id] = x;
     }
     const a = await saveProfiles(rows.map((r) => ({ id: r.id, shift_hours: r.shift_hours, days_per_week: r.days_per_week, gen_exclude: r.gen_exclude, can_weekend: r.can_weekend })));
@@ -90,6 +92,12 @@ export default function PeopleForm({ people, suggest, config }: { people: GPerso
                               <option value={5}>Sempre in ufficio (mai smart)</option>
                             </select>
                           </label>
+                          <div className="field"><span>Sede</span>
+                            <label className="check small">
+                              <input type="checkbox" checked={!!rule?.otherSite} onChange={(e) => setRule(r.id, { otherSite: e.target.checked })} />
+                              lavora in un’altra sede: sempre in presenza, non occupa posti qui
+                            </label>
+                          </div>
                           <label className="field"><span>Entra al massimo alle</span>
                             <input className="input" type="time" step={900} value={rule?.maxStart ?? ''} onChange={(e) => setRule(r.id, { maxStart: e.target.value || null })} style={{ width: 120 }} />
                           </label>

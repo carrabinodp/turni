@@ -213,7 +213,7 @@ export default function GeneratorView(props: {
           )}
 
           {result ? (
-            <Grid result={result} people={genPeople} absences={props.absences} holidays={props.holidays} config={props.config} onlyIssues={onlyIssues} />
+            <Grid elsewhere={new Set(genPeople.filter((p) => p.otherSite).map((p) => p.id))} result={result} people={genPeople} absences={props.absences} holidays={props.holidays} config={props.config} onlyIssues={onlyIssues} />
           ) : (
             <section className="card"><div className="empty">Controlla regole, persone e preferenze, poi premi “Genera bozza”. Niente viene salvato finché non premi “Salva bozza in timeline”.</div></section>
           )}
@@ -268,12 +268,18 @@ function Roles({ result, people, config, weekRoles, onChange, nameOf }: {
   );
 }
 
-function Grid({ result, people, absences, holidays, config, onlyIssues }: { result: GenResult; people: GenPerson[]; absences: Absence[]; holidays: string[]; config: GenConfig; onlyIssues: boolean }) {
+function Grid({ result, people, absences, holidays, config, onlyIssues, elsewhere }: { elsewhere: Set<string>; result: GenResult; people: GenPerson[]; absences: Absence[]; holidays: string[]; config: GenConfig; onlyIssues: boolean }) {
   const issueDays = new Set(result.issues.map((i) => i.day).filter(Boolean) as string[]);
   const days = onlyIssues ? result.days.filter((d) => issueDays.has(d)) : result.days;
   const byKey = new Map(result.shifts.map((s) => [`${s.person_id}|${s.day}`, s]));
   const absKey = new Map(absences.map((a) => [`${a.person_id}|${a.day}`, a]));
   const open = toMin(config.weekday.open), close = toMin(config.weekday.close);
+  const deskPeak = (d: string) => {
+    const here = result.shifts.filter((s) => s.day === d && s.office && !elsewhere.has(s.person_id));
+    let max = 0;
+    for (let t = 0; t < 1440; t += 30) max = Math.max(max, here.filter((s) => s.start <= t + 15 && s.end > t + 15).length);
+    return max;
+  };
   const short = (m: number) => (m % 60 ? hhmm(m) : String(m / 60).padStart(2, '0'));
 
   const rows: [string, (d: string) => string | number, (d: string, v: number) => boolean][] = [
@@ -282,8 +288,9 @@ function Grid({ result, people, absences, holidays, config, onlyIssues }: { resu
     ['Alle 9', (d) => result.shifts.filter((s) => s.day === d && s.role === 'op' && s.start <= 540 && s.end > 540).length, () => false],
     ['Dopo le 18', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.role === 'op' && s.end > 1080).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.after1800],
     ['Dopo le 18:30', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.role === 'op' && s.end > 1110).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.after1830],
-    ['In ufficio apertura', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.start <= open && s.office).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.officeAtOpen],
-    ['In ufficio chiusura', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.end >= close && s.office).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.officeAtClose],
+    ['Posti in ufficio (picco)', (d) => (isoWeekday(d) <= 5 ? deskPeak(d) : ''), (d, v) => isoWeekday(d) <= 5 && v > (config.weekday.maxOffice ?? 12)],
+    ['In ufficio apertura', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.start <= open && s.office && !elsewhere.has(s.person_id)).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.officeAtOpen],
+    ['In ufficio chiusura', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.end >= close && s.office && !elsewhere.has(s.person_id)).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.officeAtClose],
     ['Totale persone', (d) => result.shifts.filter((s) => s.day === d).length, () => false],
   ];
 

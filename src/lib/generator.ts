@@ -35,9 +35,11 @@ export interface GenPerson {
   fixed?: { days: number[]; start: string; end: string } | null;
   /** settimana con il weekend: giorni totali, quanti feriali lunghi, ore dei feriali corti */
   weekendWeek?: { days: number; longDays: number; shortHours: number } | null;
+  /** lavora in un'altra sede: sempre "in presenza", ma non occupa posti qui e non conta per apertura/chiusura */
+  otherSite?: boolean;
 }
 
-export type PersonRule = Pick<GenPerson, 'officeDays' | 'maxStart' | 'fixed' | 'weekendWeek'>;
+export type PersonRule = Pick<GenPerson, 'officeDays' | 'maxStart' | 'fixed' | 'weekendWeek' | 'otherSite'>;
 
 export interface RecEntry { person_id: string; start: string; end: string }
 export interface Companion { when: string; person_id: string; start: string; end: string }
@@ -586,13 +588,27 @@ export function generate(input: {
     const quota = new Map<string, number>();
     people.forEach((p) => {
       const n = new Set(wdShifts.filter((s) => s.person_id === p.id).map((s) => s.day)).size;
-      quota.set(p.id, Math.min(p.officeDays ?? c.officeDaysPerWeek, n));
+      quota.set(p.id, p.otherSite ? n : Math.min(p.officeDays ?? c.officeDaysPerWeek, n));
     });
     wdShifts.filter((s) => s.office).forEach((s) => quota.set(s.person_id, (quota.get(s.person_id) ?? 0) - 1));
-    const officeOn = (d: string) => wdShifts.filter((x) => x.day === d && x.office).length;
+    // posti occupati: persone in ufficio nello stesso momento (due part time che non si sovrappongono
+    // usano lo stesso posto); chi lavora in un'altra sede non conta
+    const elsewhere = new Set(people.filter((p) => p.otherSite).map((p) => p.id));
+    const peak = (d: string, from = 0, to = 1440, add?: GenShift) => {
+      const here = wdShifts.filter((x) => x.day === d && x.office && !elsewhere.has(x.person_id));
+      if (add) here.push(add);
+      let max = 0;
+      for (let t = Math.floor(from / 30) * 30; t < to; t += 30) {
+        const n = here.filter((x) => x.start <= t + 15 && x.end > t + 15).length;
+        if (n > max) max = n;
+      }
+      return max;
+    };
+    const officeOn = (d: string) => peak(d);
+    const fitsDesk = (s: GenShift) => elsewhere.has(s.person_id) || peak(s.day, s.start, s.end, s) <= W.maxOffice;
     const setOffice = (s: GenShift, force = false) => {
       if (lockedRemote.has(s)) return false;
-      if (!force && officeOn(s.day) >= W.maxOffice) return false; // ufficio pieno
+      if (!force && !fitsDesk(s)) return false; // ufficio pieno
       s.office = true;
       quota.set(s.person_id, (quota.get(s.person_id) ?? 0) - 1);
       return true;
@@ -608,7 +624,7 @@ export function generate(input: {
     }
     // prima i giorni in cui la presenza all'apertura/chiusura è più scarsa
     for (const d of wdFree) {
-      const day = wdShifts.filter((s) => s.day === d);
+      const day = wdShifts.filter((s) => s.day === d && !elsewhere.has(s.person_id));
       for (const [group, need] of [
         [day.filter((s) => s.start <= openM), W.officeAtOpen],
         [day.filter((s) => s.end >= closeM), W.officeAtClose],
@@ -631,8 +647,8 @@ export function generate(input: {
       for (const p of order) {
         if ((quota.get(p.id) ?? 0) <= 0) continue;
         const free = wdShifts
-          .filter((x) => x.person_id === p.id && !x.office && !lockedRemote.has(x) && officeOn(x.day) < W.maxOffice)
-          .sort((a, b) => officeOn(a.day) - officeOn(b.day) || rand() - 0.5);
+          .filter((x) => x.person_id === p.id && !x.office && !lockedRemote.has(x) && fitsDesk(x))
+          .sort((a, b) => peak(a.day, a.start, a.end) - peak(b.day, b.start, b.end) || rand() - 0.5);
         if (free[0] && setOffice(free[0])) moved = true;
       }
       if (!moved) break;
@@ -643,7 +659,7 @@ export function generate(input: {
         day: null, level: 'warn',
         text: `Settimana del ${w.slice(8)}/${w.slice(5, 7)}: con al massimo ${W.maxOffice} in ufficio, ${short.length} persone hanno meno giorni in ufficio del previsto (ufficio pieno): ${short.map((p) => `${p.name} −${quota.get(p.id)}`).join(', ')}`,
       });
-    for (const d of wdFree) if (officeOn(d) > W.maxOffice) issues.push({ day: d, level: 'warn', text: `${officeOn(d)} persone in ufficio (max ${W.maxOffice})` });
+    for (const d of wdFree) if (officeOn(d) > W.maxOffice) issues.push({ day: d, level: 'warn', text: `${officeOn(d)} persone in ufficio nello stesso momento (max ${W.maxOffice})` });
 
     // controlli finali della settimana
     for (const d of wdFree) {

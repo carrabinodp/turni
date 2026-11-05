@@ -225,14 +225,31 @@ test('massimo in ufficio e operativi desiderati per fascia oraria', () => {
   const r = generate({ month: '2027-02', people, config: cfg, prefs: [], absences: [], fixed: [], history: empty });
   for (const d of r.days.filter((x) => isoWeekday(x) <= 5)) {
     const day = r.shifts.filter((s) => s.day === d);
-    assert.ok(day.filter((s) => s.office).length <= 12, `${d} max 12 in ufficio`);
+    let peak = 0;
+    for (let t = 0; t < 1440; t += 30) peak = Math.max(peak, day.filter((s) => s.office && s.start <= t + 15 && s.end > t + 15).length);
+    assert.ok(peak <= 12, `${d} max 12 in ufficio nello stesso momento`);
     assert.ok(day.filter((s) => s.start <= toMin('08:00') && s.office).length >= 2, `${d} presenza in apertura`);
   }
   assert.ok(r.shifts.filter((s) => isoWeekday(s.day) >= 6).every((s) => !s.office), 'weekend smart');
-  // 25 persone × 3 giorni non entrano in 12 posti: lo segnala
-  assert.ok(r.issues.some((i) => i.text.includes('ufficio pieno')));
   // con gli obiettivi per fascia la mattina è più coperta che con tutti alle 9 e basta
   const at = (d: string, h: number) => r.shifts.filter((s) => s.day === d && s.role === 'op' && s.start <= h * 60 + 15 && s.end > h * 60 + 15).length;
   const d0 = '2027-02-03';
   assert.ok(at(d0, 10) >= at(d0, 15), 'più persone alle 10 che alle 15');
+});
+
+test('posti in ufficio contati nello stesso momento; altra sede sempre in presenza e fuori conteggio', () => {
+  const team: GenPerson[] = [...people, { id: 'vin', name: 'Vincenzo', shiftHours: 9, daysPerWeek: 5, canWeekend: false, otherSite: true }];
+  const cfg = withGenDefaults({ ...config, weekday: { ...config.weekday, maxOffice: 12 } });
+  const r = generate({ month: '2027-02', people: team, config: cfg, prefs: [], absences: [], fixed: [], history: empty });
+  for (const d of r.days.filter((x) => isoWeekday(x) <= 5)) {
+    const here = r.shifts.filter((s) => s.day === d && s.office && s.person_id !== 'vin');
+    let peak = 0;
+    for (let t = 0; t < 1440; t += 30) peak = Math.max(peak, here.filter((s) => s.start <= t + 15 && s.end > t + 15).length);
+    assert.ok(peak <= 12, `${d} picco ${peak}`);
+    const v = r.shifts.find((s) => s.day === d && s.person_id === 'vin');
+    if (v) assert.equal(v.office, true, 'Vincenzo sempre in presenza');
+  }
+  // contando i posti per orario entrano più giornate in ufficio di 12 × 5
+  const office = r.shifts.filter((s) => s.office && isoWeekday(s.day) <= 5 && s.person_id !== 'vin' && s.day >= '2027-02-08' && s.day <= '2027-02-12').length;
+  assert.ok(office > 60, `giornate in ufficio nella settimana: ${office}`);
 });
