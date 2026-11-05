@@ -571,16 +571,21 @@ export function generate(input: {
         if (short.length) issues.push({ day: d, level: 'warn', text: `Sotto il minimo di operativi alle ${short.map((i) => `${hhmm(i * 30)} (${covered(i)}/${minima[i]})`).join(', ')}` });
       }
 
-      // 5. Reclami: apre o chiude dove serve presenza
+      // 5. Reclami: turno normale (non operativo). Si sposta su apertura o chiusura solo se,
+      //    alla fine, lì manca presenza fisica in ufficio (vedi sotto)
       if (recl) {
         const rp = byId.get(recl)!;
         const r = rulesFor(prefsOf.get(recl) ?? [], d);
-        const opensWeek = weekShifts.filter((s) => s.person_id === recl && s.role === 'reclami' && s.start === openM).length;
-        const closesWeek = weekShifts.filter((s) => s.person_id === recl && s.role === 'reclami' && s.end === closeM).length;
-        const close = !r.noClose && !(rp.maxStart && closeM - L(rp) > toMin(rp.maxStart)) && (r.noOpen || closesWeek <= opensWeek);
-        const start = close ? closeM - L(rp) : openM;
-        const s: GenShift = { person_id: recl, day: d, start, end: start + L(rp), role: 'reclami', office: false };
-        dayShifts.push(s);
+        const fx: [number, number] | null = r.shift ?? (rp.fixed ? [toMin(rp.fixed.start), toMin(rp.fixed.end)] : null);
+        let start = fx ? fx[0] : toMin('09:00');
+        if (!fx) {
+          if (rp.maxStart) start = Math.min(start, toMin(rp.maxStart));
+          if (r.startBy !== null) start = Math.min(start, r.startBy);
+          if (r.startAfter !== null) start = Math.max(start, r.startAfter);
+          if (r.endBy !== null && start + L(rp) > r.endBy) start = Math.max(openM, r.endBy - L(rp));
+          if (start + L(rp) > closeM) start = closeM - L(rp);
+        }
+        dayShifts.push({ person_id: recl, day: d, start, end: fx ? fx[1] : start + L(rp), role: 'reclami', office: false });
       }
 
       weekShifts.push(...dayShifts.filter((s) => !weekShifts.includes(s)));
@@ -626,20 +631,42 @@ export function generate(input: {
       if (r.place === 'office' && !s.office) setOffice(s);
     }
     // prima i giorni in cui la presenza all'apertura/chiusura è più scarsa
+    const movedRecl = new Set<GenShift>();
     for (const d of wdFree) {
       const day = wdShifts.filter((s) => s.day === d && !elsewhere.has(s.person_id));
-      for (const [group, need] of [
+      const groups = [
         [day.filter((s) => s.start <= openM), W.officeAtOpen],
         [day.filter((s) => s.end >= closeM), W.officeAtClose],
-      ] as [GenShift[], number][]) {
+      ] as [GenShift[], number][];
+      for (const [group, need] of groups) {
         let have = group.filter((s) => s.office).length;
-        // i reclami sono i primi a garantire la presenza fisica
-        const cand = group.filter((s) => !s.office).sort((a, b) => (b.role === 'reclami' ? 1 : 0) - (a.role === 'reclami' ? 1 : 0) || (quota.get(b.person_id) ?? 0) - (quota.get(a.person_id) ?? 0));
+        const cand = group.filter((s) => !s.office).sort((a, b) => (quota.get(b.person_id) ?? 0) - (quota.get(a.person_id) ?? 0));
         for (const s of cand) {
           if (have >= need) break;
           if ((quota.get(s.person_id) ?? 0) > 0 && setOffice(s)) have++;
         }
-        if (have < need) issues.push({ day: d, level: 'warn', text: `${group === day.filter((s) => s.start <= openM) ? 'Apertura' : 'Chiusura'}: ${have} in ufficio (servono ${need})` });
+        const isOpen = group === groups[0]![0];
+        // manca presenza: chi fa Reclami quel giorno (se non è già usato sull'altro bordo) si sposta qui
+        if (have < need) {
+          const rs = wdShifts.find((x) => x.day === d && x.role === 'reclami' && !elsewhere.has(x.person_id) && !movedRecl.has(x));
+          if (rs) {
+            const rp = byId.get(rs.person_id)!;
+            const r = rulesFor(prefsOf.get(rs.person_id) ?? [], d);
+            const len = rs.end - rs.start;
+            const st = isOpen ? openM : closeM - len;
+            const allowed = !(r.shift || rp.fixed) && !(isOpen ? r.noOpen : r.noClose) && !(r.startAfter !== null && st < r.startAfter) &&
+              !(r.startBy !== null && st > r.startBy) && !(rp.maxStart && st > toMin(rp.maxStart)) && !(r.endBy !== null && st + len > r.endBy) &&
+              (rs.office || (quota.get(rs.person_id) ?? 0) > 0);
+            if (allowed) {
+              rs.start = st;
+              rs.end = st + len;
+              movedRecl.add(rs);
+              if (!rs.office) setOffice(rs);
+              if (rs.office) have++;
+            }
+          }
+        }
+        if (have < need) issues.push({ day: d, level: 'warn', text: `${isOpen ? 'Apertura' : 'Chiusura'}: ${have} in ufficio (servono ${need})` });
       }
     }
     // il resto della quota: un giorno a testa per giro, nei giorni con meno persone in ufficio,
