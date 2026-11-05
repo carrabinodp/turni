@@ -49,9 +49,9 @@ const SYN = {
   date: ['data', 'date', 'giorno', 'day', 'data chiamata', 'call date'],
   time: ['ora', 'orario', 'time', 'ora chiamata', 'ora arrivo', 'call time', 'ora inizio'],
   outcome: ['esito', 'stato', 'status', 'outcome', 'risultato', 'result', 'disposition', 'tipo esito', 'call result', 'risposta'],
-  wait: ['attesa', 'tempo attesa', 'tempo di attesa', 'tempo in coda', 'attesa in coda', 'wait', 'wait time', 'queue time', 'hold time in queue', 'time in queue', 'ring time', 'squillo'],
+  wait: ['waiting', 'waiting time', 'wait duration', 'attesa', 'tempo attesa', 'tempo di attesa', 'tempo in coda', 'attesa in coda', 'wait', 'wait time', 'queue time', 'hold time in queue', 'time in queue', 'ring time', 'squillo'],
   talk: ['durata', 'conversazione', 'durata conversazione', 'tempo conversazione', 'talk time', 'talk', 'duration', 'handle time', 'durata chiamata', 'tempo di gestione'],
-  acw: ['post chiamata', 'post-chiamata', 'acw', 'after call work', 'wrap up', 'wrap-up', 'wrap time', 'tempo post chiamata'],
+  acw: ['wrap up time', 'wrapup', 'post chiamata', 'post-chiamata', 'acw', 'after call work', 'wrap up', 'wrap-up', 'wrap time', 'tempo post chiamata'],
   queue: ['coda', 'queue', 'servizio', 'skill', 'gruppo', 'linea', 'canale', 'numero chiamato', 'ivr'],
   direction: ['direzione', 'direction', 'tipo chiamata', 'call type', 'verso', 'tipo'],
 };

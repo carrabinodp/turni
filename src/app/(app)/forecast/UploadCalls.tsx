@@ -1,7 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { fmtDay } from '@/lib/time';
+import { fmtDay, localDate, todayIn } from '@/lib/time';
 import type { Rows } from '@/lib/import/parse';
 import { aggregate, detectCalls, parseCalls, type CallMapping, type ParsedCalls } from '@/lib/calls';
 import { showToast, ActionButton } from '@/components/ui';
@@ -26,6 +26,7 @@ export default function UploadCalls({ tz, uploads, dataRange }: { tz: string; up
   const [file, setFile] = useState<{ name: string; rows: Rows; sheet: string } | null>(null);
   const [map, setMap] = useState<CallMapping | null>(null);
   const [byQueue, setByQueue] = useState(false);
+  const [skipToday, setSkipToday] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -56,7 +57,11 @@ export default function UploadCalls({ tz, uploads, dataRange }: { tz: string; up
   }
 
   const header = file && map ? (file.rows[map.headerRow] ?? []).map((h, i) => String(h ?? `Colonna ${i + 1}`)) : [];
-  const parsed: ParsedCalls | null = file && map && (map.datetime !== null || map.date !== null) ? parseCalls(file.rows, map, tz, new Date().getFullYear()) : null;
+  const raw: ParsedCalls | null = file && map && (map.datetime !== null || map.date !== null) ? parseCalls(file.rows, map, tz, new Date().getFullYear()) : null;
+  // la giornata di oggi non è finita: se entrasse nello storico peserebbe come un giorno quasi vuoto
+  const today = todayIn(tz);
+  const todayCalls = raw ? raw.calls.filter((c) => localDate(c.s, tz) >= today).length : 0;
+  const parsed: ParsedCalls | null = raw && skipToday && todayCalls ? { ...raw, calls: raw.calls.filter((c) => localDate(c.s, tz) < today) } : raw;
   const agg = parsed ? aggregate(parsed.calls, tz, byQueue) : [];
   const days = Array.from(new Set(agg.map((a) => a.day))).sort();
   const range = days.length ? { from: days[0]!, to: days[days.length - 1]! } : null;
@@ -133,6 +138,16 @@ export default function UploadCalls({ tz, uploads, dataRange }: { tz: string; up
                   {map.talk === null && <div className="small" style={{ color: 'var(--warn)' }}>Senza la durata uso 3 minuti a chiamata per calcolare le persone necessarie.</div>}
                   {queues.length > 1 && (
                     <label className="check small"><input type="checkbox" checked={byQueue} onChange={(e) => setByQueue(e.target.checked)} /> Tieni separate le {queues.length} code ({queues.slice(0, 4).join(', ')}{queues.length > 4 ? '…' : ''})</label>
+                  )}
+                  {todayCalls > 0 && (
+                    <label className="check small">
+                      <input type="checkbox" checked={skipToday} onChange={(e) => setSkipToday(e.target.checked)} /> Escludi oggi ({todayCalls} chiamate): la giornata non è ancora finita e falserebbe lo storico
+                    </label>
+                  )}
+                  {days.length > 0 && days.length < 14 && (
+                    <div className="small" style={{ color: 'var(--warn)' }}>
+                      {days.length === 1 ? 'Un solo giorno' : `Solo ${days.length} giorni`}: va bene per vedere le fasce di quel giorno, ma per prevedere servono almeno 3 settimane (meglio 8 o più). Puoi caricare più file, uno per periodo.
+                    </div>
                   )}
                   {overlap && <div className="small" style={{ color: 'var(--warn)' }}>I giorni di questo file sostituiranno quelli già caricati nello stesso periodo.</div>}
                   <div className="small muted">Al server vanno solo i totali di {agg.length.toLocaleString('it-IT')} mezz’ore: nessun nome, nessun numero di telefono.</div>

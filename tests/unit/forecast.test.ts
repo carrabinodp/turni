@@ -166,3 +166,23 @@ test('copertura al telefono e analisi dello storico', () => {
   assert.ok(an.kpi.sl! > 0 && an.kpi.sl! <= 1);
   assert.ok(an.cells.some((c) => c.weekday === 1 && c.slot === 20 && c.required > 0));
 });
+
+test('export "Segments - List" del centralino DentalPro (filtri sopra, durate mm:ss, "—" se non risposta)', () => {
+  const rows = roundtrip([
+    ['Applied filters:', 'Area IN ((empty value))'],
+    [null, 'Date BETWEEN THIS-96 AND THIS'],
+    [null, null],
+    ['#', 'Date', 'Time', 'Agent', 'External Contact', 'Area', 'Customer Phone', 'Waiting', 'Talk Time', 'Wrap Up'],
+    ['id1', 46330, '09:14', '', '+390000000001', '', 'sip:x', '00:07', '—', '—'],
+    ['id2', 46330, '09:13', 'AZIENDA\\Op1', '+390000000002', '', 'sip:x', '00:05', '00:54', '00:01'],
+    ['id3', 46330, '09:44', 'AZIENDA\\Op2', '+390000000003', '', 'sip:x', '01:38', '01:03', '01:00'],
+  ]);
+  const map = detectCalls(rows)!;
+  assert.deepEqual([map.headerRow, map.date, map.time, map.wait, map.talk, map.acw], [3, 1, 2, 7, 8, 9]);
+  const agg = aggregate(parseCalls(rows, map, tz, 2026).calls, tz, false);
+  assert.deepEqual(agg.map((a) => [a.day, a.slot, a.offered, a.answered, a.abandoned, a.ans_20, a.handle_sum_sec]), [
+    ['2026-11-04', 18, 2, 1, 1, 1, 55],
+    ['2026-11-04', 19, 1, 1, 0, 0, 123],
+  ]);
+  assert.ok(!JSON.stringify(agg).includes('Op1') && !JSON.stringify(agg).includes('+39'));
+});
