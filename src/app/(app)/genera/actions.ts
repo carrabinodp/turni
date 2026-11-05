@@ -1,13 +1,13 @@
 'use server';
 import { revalidatePath } from 'next/cache';
 import { getSession, requireManager } from '@/lib/session';
-import { parsePref, type GenConfig, type PrefKind } from '@/lib/generator';
+import type { GenConfig } from '@/lib/generator';
+import { parsePrefs, PREF_KINDS, type PrefKind } from '@/lib/prefParse';
 
 type R = { ok: true; message: string } | { ok: false; error: string };
 const MONTH = /^\d{4}-\d{2}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const TIME = /^\d{2}:\d{2}$/;
-const KINDS: PrefKind[] = ['off', 'start_after', 'end_by', 'no_close', 'no_open', 'shift', 'no_weekend', 'note'];
 
 export async function saveGenConfig(c: GenConfig): Promise<R> {
   const { supabase } = await requireManager();
@@ -42,6 +42,8 @@ export interface PrefInput {
   weekday: number | null;
   time_a: string | null;
   time_b: string | null;
+  place?: 'office' | 'remote' | null;
+  alt_for?: string | null;
   reviewed: boolean;
 }
 
@@ -52,11 +54,12 @@ function cleanPref(p: PrefInput) {
     month: p.month,
     person_id: p.person_id,
     text: p.text.trim().slice(0, 300),
-    kind: KINDS.includes(p.kind) ? p.kind : 'note',
+    kind: PREF_KINDS.includes(p.kind) ? p.kind : 'note',
     day: p.day && ISO.test(p.day) ? p.day : null,
     weekday: p.weekday && p.weekday >= 1 && p.weekday <= 7 ? p.weekday : null,
     time_a: p.time_a && TIME.test(p.time_a) ? p.time_a : null,
     time_b: p.time_b && TIME.test(p.time_b) ? p.time_b : null,
+    place: p.place === 'office' || p.place === 'remote' ? p.place : null,
     reviewed: !!p.reviewed,
   };
 }
@@ -83,28 +86,62 @@ export async function deletePref(id: string): Promise<R> {
   return { ok: true, message: 'Preferenza eliminata' };
 }
 
-/** preferenze da un file: una riga per persona, una o più colonne di testo */
+type Db = Awaited<ReturnType<typeof getSession>>['supabase'];
+
+/** traduce le frasi in vincoli e li salva; le alternative ("altrimenti il 5") vengono collegate alla principale */
+async function insertParsed(supabase: Db, month: string, rows: { person_id: string; text: string }[], extra: Record<string, unknown>) {
+  const first = `${month}-01`;
+  const next = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 1)).toISOString().slice(0, 10);
+  const primaries: Record<string, unknown>[] = [];
+  const alts: { row: Record<string, unknown>; person_id: string; alt_day: string }[] = [];
+  for (const r of rows) {
+    const text = r.text.trim().slice(0, 300);
+    if (!r.person_id || !text) continue;
+    for (const p of parsePrefs(text, month)) {
+      const outside = !!p.day && (p.day < first || p.day >= next);
+      const row = {
+        month, person_id: r.person_id, text, ...extra,
+        kind: outside ? 'note' : p.kind, day: p.day, weekday: p.weekday, time_a: p.time_a, time_b: p.time_b, place: p.place,
+      };
+      if (p.alt_day && !outside) alts.push({ row, person_id: r.person_id, alt_day: p.alt_day });
+      else primaries.push(row);
+    }
+  }
+  if (primaries.length) {
+    const { error } = await supabase.from('gen_preferences').insert(primaries);
+    if (error) throw new Error(error.message);
+  }
+  for (const a of alts) {
+    const { data } = await supabase.from('gen_preferences').select('id').eq('month', month).eq('person_id', a.person_id).eq('day', a.alt_day).neq('kind', 'note').limit(1);
+    const { error } = await supabase.from('gen_preferences').insert({ ...a.row, alt_for: data?.[0]?.id ?? null });
+    if (error) throw new Error(error.message);
+  }
+  return primaries.length + alts.length;
+}
+
+/** preferenze da un file (modulo Google o elenco): persona già riconosciuta, testo come scritto */
 export async function importPrefs(month: string, rows: { person_id: string; text: string }[]): Promise<R> {
   const { supabase, me } = await requireManager();
   if (!MONTH.test(month)) return { ok: false, error: 'Mese non valido' };
-  const list = rows
-    .filter((r) => r.person_id && r.text.trim())
-    .slice(0, 500)
-    .map((r) => ({ month, person_id: r.person_id, text: r.text.trim().slice(0, 300), ...parsePref(r.text, month), source: 'manager', created_by: me.id }));
-  if (!list.length) return { ok: false, error: 'Nessuna preferenza da importare' };
-  const { error } = await supabase.from('gen_preferences').insert(list);
-  if (error) return { ok: false, error: error.message };
-  revalidatePath('/genera');
-  return { ok: true, message: `${list.length} preferenze importate` };
+  try {
+    const n = await insertParsed(supabase, month, rows.slice(0, 500), { source: 'manager', created_by: me.id });
+    if (!n) return { ok: false, error: 'Nessuna preferenza da importare' };
+    revalidatePath('/genera');
+    return { ok: true, message: `${n} vincoli importati da ${rows.length} preferenze` };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
 }
 
 /** preferenze dell'operatore (dal suo calendario) */
 export async function addMyPref(month: string, text: string): Promise<R> {
   const { supabase, me } = await getSession();
   if (!MONTH.test(month) || !text.trim()) return { ok: false, error: 'Scrivi la preferenza' };
-  const parsed = parsePref(text, month);
-  const { error } = await supabase.from('gen_preferences').insert({ month, person_id: me.id, text: text.trim().slice(0, 300), ...parsed });
-  if (error) return { ok: false, error: error.message };
+  try {
+    await insertParsed(supabase, month, [{ person_id: me.id, text }], {});
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
   revalidatePath('/i-miei-turni');
   return { ok: true, message: 'Preferenza inviata' };
 }

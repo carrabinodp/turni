@@ -585,4 +585,26 @@ begin
 end $$;
 reset role;
 
+-- ---- 0009: una frase, più vincoli; alternative
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+set role authenticated;
+do $$
+declare g uuid := current_person_id(); p1 uuid;
+begin
+  insert into gen_preferences (month, person_id, text, kind, day) values
+    ('2027-03', g, 'non lavorare sabato 6 e domenica 7', 'off', '2027-03-06'),
+    ('2027-03', g, 'non lavorare sabato 6 e domenica 7', 'off', '2027-03-07');
+  insert into gen_preferences (month, person_id, text, kind, day, place) values ('2027-03', g, '11 in smart', 'place', '2027-03-11', 'remote');
+  insert into gen_preferences (month, person_id, text, kind, day) values ('2027-03', g, 'riposo il 15', 'off', '2027-03-15') returning id into p1;
+  insert into gen_preferences (month, person_id, text, kind, day, alt_for) values ('2027-03', g, 'riposo il 15', 'off', '2027-03-05', p1);
+  assert (select count(*) from gen_preferences where person_id = g and month = '2027-03') = 5, 'una frase, più vincoli';
+  begin
+    insert into gen_preferences (month, person_id, text) values ('2027-03', g, 'quarta frase');
+    raise exception 'doveva fallire';
+  exception when others then
+    if sqlerrm = 'doveva fallire' then raise; end if;
+  end;
+end $$;
+reset role;
+
 select 'TUTTI I TEST SQL PASSATI';

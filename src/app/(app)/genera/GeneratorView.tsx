@@ -14,7 +14,7 @@ import RulesForm from './RulesForm';
 import PeopleForm from './PeopleForm';
 import PrefsPanel from './PrefsPanel';
 
-export interface GPerson { id: string; name: string; role: string; team: string | null; shift_hours: number | null; days_per_week: number | null; gen_exclude: boolean; can_weekend: boolean }
+export interface GPerson { id: string; name: string; email?: string | null; role: string; team: string | null; shift_hours: number | null; days_per_week: number | null; gen_exclude: boolean; can_weekend: boolean }
 export interface GActivity { id: string; name: string; kind: string; color: string }
 export interface GDayType { id: string; name: string; color: string; place: 'office' | 'remote' | null }
 export type GPref = Pref & { source: string; reviewed: boolean; month: string };
@@ -117,9 +117,15 @@ export default function GeneratorView(props: {
           if (s.sub && recAct) rows.push({ person_id: s.person_id, activity_id: recAct, starts_at: iso(s.day, s.sub[0]), ends_at: iso(s.day, s.sub[1]) });
           blocks.push({ person_id: s.person_id, s: Date.parse(iso(s.day, s.start)), e: Date.parse(iso(s.day, s.end)), kind: 'work' });
         }
-        // pause e pranzo con le regole della timeline
+        // pause e pranzo con le regole della timeline; chi ha il pranzo a orario fisso lo tiene lì
+        const fixedLunch = sh.filter((s) => s.lunch !== undefined).map((s) => ({ person_id: s.person_id, s: Date.parse(iso(s.day, s.lunch!)), e: Date.parse(iso(s.day, s.lunch! + 60)) }));
         if (props.breakActivityId) {
-          for (const b of planBreaks(blocks, policy, order, props.snapMinutes)) {
+          for (const fl of fixedLunch) rows.push({ person_id: fl.person_id, activity_id: props.lunchActivityId ?? props.breakActivityId, starts_at: new Date(fl.s).toISOString(), ends_at: new Date(fl.e).toISOString() });
+          const planned = planBreaks(blocks, policy, order, props.snapMinutes).filter((b) => {
+            const fl = fixedLunch.find((x) => x.person_id === b.person_id && Math.abs(x.s - b.s) < 12 * 3600000);
+            return !fl || (b.type !== 'lunch' && (b.e <= fl.s || b.s >= fl.e));
+          });
+          for (const b of planned) {
             const act = b.type === 'lunch' ? props.lunchActivityId ?? props.breakActivityId : props.breakActivityId;
             rows.push({ person_id: b.person_id, activity_id: act, starts_at: new Date(b.s).toISOString(), ends_at: new Date(b.e).toISOString() });
           }

@@ -88,7 +88,8 @@ export function withGenDefaults(c?: Partial<GenConfig> | null): GenConfig {
   };
 }
 
-export type PrefKind = 'off' | 'start_after' | 'end_by' | 'no_close' | 'no_open' | 'shift' | 'no_weekend' | 'note';
+import { parsePrefs, type PrefKind } from './prefParse';
+export { parsePrefs, type PrefKind };
 export interface Pref {
   id: string;
   person_id: string;
@@ -98,6 +99,9 @@ export interface Pref {
   weekday: number | null; // 1 = lunedì … 7 = domenica (ricorrente)
   time_a: string | null;
   time_b: string | null;
+  place?: 'office' | 'remote' | null;
+  /** alternativa a un'altra preferenza: vale solo se quella viene tolta */
+  alt_for?: string | null;
 }
 
 export interface Absence { person_id: string; day: string; full: boolean; name: string; s?: number; e?: number }
@@ -116,6 +120,8 @@ export interface GenShift {
   sub?: [number, number]; // blocco REC dentro il turno (affiancamento)
   office: boolean;
   fixed?: boolean;
+  /** pranzo a orario fisso (minuti) */
+  lunch?: number;
 }
 
 export interface GenIssue { day: string | null; person_id?: string; level: 'warn' | 'bad'; text: string }
@@ -148,22 +154,36 @@ function rng(seed: number) {
 }
 
 /* ---------------- preferenze ---------------- */
-const prefApplies = (p: Pref, day: string) => (p.day ? p.day === day : p.weekday ? p.weekday === isoDow(day) : !!(p.kind === 'no_close' || p.kind === 'no_open' || p.kind === 'no_weekend'));
+const MONTHWIDE: PrefKind[] = ['no_close', 'no_open', 'no_weekend', 'start_window', 'lunch_at', 'morning', 'want_close', 'place'];
+const prefApplies = (p: Pref, day: string) => (p.day ? p.day === day : p.weekday ? p.weekday === isoDow(day) : MONTHWIDE.includes(p.kind));
 
-interface DayRules { off: boolean; startAfter: number | null; endBy: number | null; noClose: boolean; noOpen: boolean; shift: [number, number] | null; prefs: Pref[] }
+interface DayRules {
+  off: boolean; startAfter: number | null; startBy: number | null; endBy: number | null; noClose: boolean; noOpen: boolean;
+  shift: [number, number] | null; wantClose: boolean; place: 'office' | 'remote' | null; lunch: number | null; weekendOk: boolean; prefs: Pref[];
+}
 function rulesFor(prefs: Pref[], day: string): DayRules {
-  const r: DayRules = { off: false, startAfter: null, endBy: null, noClose: false, noOpen: false, shift: null, prefs: [] };
+  const r: DayRules = { off: false, startAfter: null, startBy: null, endBy: null, noClose: false, noOpen: false, shift: null, wantClose: false, place: null, lunch: null, weekendOk: false, prefs: [] };
+  const weekend = isoDow(day) >= 6;
+  if (prefs.some((p) => p.kind === 'weekend_ok' && p.day === day)) r.weekendOk = true;
   for (const p of prefs) {
     if (!prefApplies(p, day)) continue;
-    if (p.kind === 'note') continue;
+    if (p.kind === 'note' || p.kind === 'week_shift' || p.kind === 'sat_pick' || p.kind === 'weekend_ok') continue;
     r.prefs.push(p);
     if (p.kind === 'off') r.off = true;
-    if (p.kind === 'no_weekend' && isoDow(day) >= 6) r.off = true;
+    if (p.kind === 'no_weekend' && weekend && !r.weekendOk) r.off = true;
     if (p.kind === 'start_after' && p.time_a) r.startAfter = Math.max(r.startAfter ?? 0, toMin(p.time_a));
+    if (p.kind === 'start_window' && p.time_a && p.time_b) {
+      r.startAfter = Math.max(r.startAfter ?? 0, toMin(p.time_a));
+      r.startBy = Math.min(r.startBy ?? 1440, toMin(p.time_b));
+    }
+    if (p.kind === 'morning') r.startBy = Math.min(r.startBy ?? 1440, toMin('09:00'));
     if (p.kind === 'end_by' && p.time_a) r.endBy = Math.min(r.endBy ?? 1440, toMin(p.time_a));
     if (p.kind === 'no_close') r.noClose = true;
     if (p.kind === 'no_open') r.noOpen = true;
+    if (p.kind === 'want_close') r.wantClose = true;
+    if (p.kind === 'lunch_at' && p.time_a) r.lunch = toMin(p.time_a);
     if (p.kind === 'shift' && p.time_a && p.time_b) r.shift = [toMin(p.time_a), toMin(p.time_b)];
+    if ((p.kind === 'shift' || p.kind === 'place' || p.kind === 'morning') && p.place) r.place = p.place;
   }
   return r;
 }
@@ -191,8 +211,11 @@ export function generate(input: {
   const inMonth = (d: string) => d >= first && d < next;
 
   const byId = new Map(people.map((p) => [p.id, p]));
+  // un'alternativa vale solo se la preferenza principale è stata tolta o lasciata come nota
+  const prefById = new Map(input.prefs.map((p) => [p.id, p]));
+  const activePrefs = input.prefs.filter((p) => !p.alt_for || !prefById.has(p.alt_for) || prefById.get(p.alt_for)!.kind === 'note');
   const prefsOf = new Map<string, Pref[]>();
-  input.prefs.forEach((p) => {
+  activePrefs.forEach((p) => {
     if (!prefsOf.has(p.person_id)) prefsOf.set(p.person_id, []);
     prefsOf.get(p.person_id)!.push(p);
   });
@@ -234,7 +257,13 @@ export function generate(input: {
   const W = c.weekday;
   const openM = toMin(W.open), closeM = toMin(W.close);
 
+  const weekOpts = (pid: string) =>
+    (prefsOf.get(pid) ?? []).filter((p) => p.kind === 'week_shift' && p.time_a && p.time_b).sort((a, b) => (a.time_a! < b.time_a! ? -1 : 1));
+  const satPicks = (pid: string) => (prefsOf.get(pid) ?? []).filter((p) => p.kind === 'sat_pick' && p.day).map((p) => p.day!);
+  const reluctant = (pid: string, d: string) => (prefsOf.get(pid) ?? []).some((p) => p.kind === 'no_weekend') && rulesFor(prefsOf.get(pid) ?? [], d).weekendOk;
+  let weekIndex = -1;
   for (const w of weeks) {
+    weekIndex++;
     const days = Array.from({ length: 7 }, (_, i) => addDays(w, i));
     const free = days.filter(inMonth);
     if (!free.length) continue;
@@ -282,8 +311,12 @@ export function generate(input: {
       if (!c.sunday.enabled) continue;
       const n = Math.max(0, c.sunday.people - pushFixedWeekend(d));
       const cand = people
-        .filter((p) => p.canWeekend && !p.fixed && available(p.id, d) && p.id !== recPerson && p.id !== reclPerson)
-        .sort((a, b) => get(cnt.sun, a.id) - get(cnt.sun, b.id) || b.shiftHours - a.shiftHours || rand() - 0.5);
+        .filter((p) => {
+          const rr = rulesFor(prefsOf.get(p.id) ?? [], d);
+          const fitsHours = !(rr.startBy !== null && toMin(c.sunday.start) > rr.startBy) && !(rr.endBy !== null && toMin(c.sunday.end) > rr.endBy) && !(rr.startAfter !== null && toMin(c.sunday.start) < rr.startAfter);
+          return p.canWeekend && !p.fixed && fitsHours && available(p.id, d) && p.id !== recPerson && p.id !== reclPerson;
+        })
+        .sort((a, b) => Number(reluctant(a.id, d)) - Number(reluctant(b.id, d)) || get(cnt.sun, a.id) - get(cnt.sun, b.id) || b.shiftHours - a.shiftHours || rand() - 0.5);
       const chosen = cand.slice(0, n);
       if (chosen.length < n) issues.push({ day: d, level: 'bad', text: `Domenica/festivo: ${chosen.length} persone su ${n}` });
       chosen.forEach((p) => {
@@ -296,8 +329,9 @@ export function generate(input: {
     if (sat && c.saturday.enabled) {
       const S = c.saturday;
       const cand = people
-        .filter((p) => p.canWeekend && !p.fixed && available(p.id, sat) && (S.people > 0) && !(weekendPicked.get(p.id)?.length) && p.id !== recPerson && p.id !== reclPerson && (satThisMonth.get(p.id) ?? 0) < c.maxSaturdaysPerMonth)
-        .sort((a, b) => get(cnt.sat, a.id) - get(cnt.sat, b.id) || rand() - 0.5);
+        .filter((p) => p.canWeekend && !p.fixed && available(p.id, sat) && (S.people > 0) && !(weekendPicked.get(p.id)?.length) && p.id !== recPerson && p.id !== reclPerson && (satThisMonth.get(p.id) ?? 0) < c.maxSaturdaysPerMonth && (!satPicks(p.id).length || satPicks(p.id).includes(sat)))
+        // prima chi ha chiesto proprio questo sabato, per ultimi i disponibili "solo se serve"
+        .sort((a, b) => Number(satPicks(b.id).includes(sat)) - Number(satPicks(a.id).includes(sat)) || Number(reluctant(a.id, sat)) - Number(reluctant(b.id, sat)) || get(cnt.sat, a.id) - get(cnt.sat, b.id) || rand() - 0.5);
       const satOpen = toMin(S.open), satClose = toMin(S.close);
       const T10 = toMin('10:00'), T14 = toMin('14:00'), T18 = toMin('18:00');
       // copertura possibile con queste persone: un turno lungo copre mattina e pomeriggio, uno corto solo una delle due
@@ -321,7 +355,7 @@ export function generate(input: {
       if (chosen.length + fixedSat < S.people) issues.push({ day: sat, level: 'bad', text: `Sabato: ${chosen.length + fixedSat} persone su ${S.people}` });
       const plan: GenShift[] = [];
       const byLen = [...chosen].sort((a, b) => b.shiftHours - a.shiftHours);
-      const closers = byLen.filter((p) => !rulesFor(prefsOf.get(p.id) ?? [], sat).noClose && !(p.maxStart && satClose - p.shiftHours * 60 > toMin(p.maxStart))).slice(0, Math.max(1, S.closeMin));
+      const closers = byLen.filter((p) => !rulesFor(prefsOf.get(p.id) ?? [], sat).noClose && !(p.maxStart && satClose - p.shiftHours * 60 > toMin(p.maxStart)) && !((rulesFor(prefsOf.get(p.id) ?? [], sat).startBy ?? 1440) < satClose - p.shiftHours * 60)).slice(0, Math.max(1, S.closeMin));
       closers.forEach((p) => plan.push({ person_id: p.id, day: sat, start: satClose - p.shiftHours * 60, end: satClose, role: 'op', office: false }));
       const covAm = () => plan.filter((s) => s.start <= T10 && s.end > T10).length;
       const covPm = () => plan.filter((s) => s.start <= T14 && s.end >= T18).length;
@@ -331,7 +365,7 @@ export function generate(input: {
         let start = Math.max(satOpen, r.startAfter ?? 0);
         if (p.shiftHours < 8) {
           const amDef = S.at1000 - covAm(), pmDef = S.afternoon - covPm();
-          if (pmDef > amDef) start = Math.max(start, T18 - p.shiftHours * 60);
+          if (pmDef > amDef && (r.startBy ?? 1440) >= T18 - p.shiftHours * 60) start = Math.max(start, T18 - p.shiftHours * 60);
         }
         let end = Math.min(start + p.shiftHours * 60, satClose);
         if (r.endBy && end > r.endBy) { end = r.endBy; start = Math.max(satOpen, end - p.shiftHours * 60); }
@@ -371,7 +405,9 @@ export function generate(input: {
       const pickedDays = [...avail];
       while (pickedDays.length > need) {
         // riposa nel giorno in cui riposano meno persone (il lunedì, con più chiamate, per ultimo)
-        pickedDays.sort((x, y) => (restCount.get(x) ?? 0) - (restCount.get(y) ?? 0) || (isoDow(x) === 1 ? 1 : 0) - (isoDow(y) === 1 ? 1 : 0) || rand() - 0.5);
+        // mai a riposo nei giorni in cui ha chiesto un turno preciso, la mattina o la chiusura
+        const wants = (d: string) => (prefsOf.get(p.id) ?? []).some((q) => q.day === d && ['shift', 'morning', 'want_close', 'place', 'end_by', 'start_after'].includes(q.kind));
+        pickedDays.sort((x, y) => Number(wants(x)) - Number(wants(y)) || (restCount.get(x) ?? 0) - (restCount.get(y) ?? 0) || (isoDow(x) === 1 ? 1 : 0) - (isoDow(y) === 1 ? 1 : 0) || rand() - 0.5);
         const d = pickedDays.shift()!;
         restCount.set(d, (restCount.get(d) ?? 0) + 1);
       }
@@ -416,7 +452,9 @@ export function generate(input: {
       // turni fissi e turni imposti dalle preferenze ("turno preciso")
       for (const p of ops) {
         const r = rules.get(p.id)!;
-        const fx: [number, number] | null = r.shift ?? (p.fixed ? [toMin(p.fixed.start), toMin(p.fixed.end)] : null);
+        const opts = weekOpts(p.id);
+        const wk = opts.length ? opts[weekIndex % opts.length]! : null;
+        const fx: [number, number] | null = r.shift ?? (p.fixed ? [toMin(p.fixed.start), toMin(p.fixed.end)] : wk ? [toMin(wk.time_a!), toMin(wk.time_b!)] : null);
         if (fx) {
           dayShifts.push({ person_id: p.id, day: d, start: fx[0], end: fx[1], role: 'op', office: false });
           taken.add(p.id);
@@ -427,6 +465,7 @@ export function generate(input: {
         const r = rules.get(p.id)!;
         if (p.maxStart && start > toMin(p.maxStart)) return false;
         if (r.startAfter !== null && start < r.startAfter) return false;
+        if (r.startBy !== null && start > r.startBy) return false;
         if (r.endBy !== null && end > r.endBy) return false;
         return true;
       };
@@ -443,7 +482,7 @@ export function generate(input: {
       for (let i = 0; i < W.closeOps; i++) {
         const cand = pool().filter((p) => !rules.get(p.id)!.noClose && fits(p, closeM - L(p), closeM));
         const ok = cand.filter((p) => closesThisWeek(p.id) < W.maxClosePerWeek);
-        const list = (ok.length ? ok : cand).sort((a, b) => get(cnt.close, a.id) + noise() - (get(cnt.close, b.id) + noise()));
+        const list = (ok.length ? ok : cand).sort((a, b) => Number(rules.get(b.id)!.wantClose) - Number(rules.get(a.id)!.wantClose) || get(cnt.close, a.id) + noise() - (get(cnt.close, b.id) + noise()));
         const p = list[0];
         if (!p) break;
         if (!ok.length) issues.push({ day: d, person_id: p.id, level: 'warn', text: `${p.name}: seconda chiusura della settimana` });
@@ -490,6 +529,7 @@ export function generate(input: {
         const r = rules.get(p.id)!;
         let start = toMin('09:00');
         if (p.maxStart) start = Math.min(start, toMin(p.maxStart));
+        if (r.startBy !== null) start = Math.min(start, r.startBy);
         if (r.startAfter !== null) start = Math.max(start, r.startAfter);
         if (r.endBy !== null && start + L(p) > r.endBy) start = Math.max(openM, r.endBy - L(p));
         if (start + L(p) > closeM) start = closeM - L(p);
@@ -520,9 +560,19 @@ export function generate(input: {
     });
     wdShifts.filter((s) => s.office).forEach((s) => quota.set(s.person_id, (quota.get(s.person_id) ?? 0) - 1));
     const setOffice = (s: GenShift) => {
+      if (lockedRemote.has(s)) return;
       s.office = true;
       quota.set(s.person_id, (quota.get(s.person_id) ?? 0) - 1);
     };
+    // dove l'operatore ha chiesto ufficio o smart in quel giorno
+    const lockedRemote = new Set<GenShift>();
+    for (const s of weekShifts.filter((x) => !x.fixed)) {
+      const r = rulesFor(prefsOf.get(s.person_id) ?? [], s.day);
+      if (r.lunch !== null && s.end - s.start >= 7 * 60) s.lunch = r.lunch;
+      if (isoDow(s.day) > 5) continue;
+      if (r.place === 'remote') lockedRemote.add(s);
+      if (r.place === 'office' && !s.office) setOffice(s);
+    }
     // prima i giorni in cui la presenza all'apertura/chiusura è più scarsa
     for (const d of wdFree) {
       const day = wdShifts.filter((s) => s.day === d);
@@ -580,16 +630,21 @@ export function generate(input: {
   }
 
   // preferenze non rispettate
-  for (const pr of input.prefs) {
-    if (pr.kind === 'note') continue;
+  for (const pr of activePrefs) {
+    if (pr.kind === 'note' || pr.kind === 'week_shift' || pr.kind === 'weekend_ok' || pr.kind === 'lunch_at') continue;
+    if (pr.kind === 'sat_pick') continue;
     const mine = shifts.filter((s) => s.person_id === pr.person_id && prefApplies(pr, s.day));
     const broken = mine.filter((s) => {
-      if (pr.kind === 'off' || (pr.kind === 'no_weekend' && isoDow(s.day) >= 6)) return true;
+      if (pr.kind === 'off' || (pr.kind === 'no_weekend' && isoDow(s.day) >= 6 && !rulesFor(prefsOf.get(pr.person_id) ?? [], s.day).weekendOk)) return true;
       if (pr.kind === 'start_after' && pr.time_a) return s.start < toMin(pr.time_a);
       if (pr.kind === 'end_by' && pr.time_a) return s.end > toMin(pr.time_a);
       if (pr.kind === 'no_close') return s.end >= closeM;
       if (pr.kind === 'no_open') return s.start <= openM;
-      if (pr.kind === 'shift' && pr.time_a && pr.time_b) return s.start !== toMin(pr.time_a) || s.end !== toMin(pr.time_b);
+      if (pr.kind === 'shift' && pr.time_a && pr.time_b) return s.start !== toMin(pr.time_a) || s.end !== toMin(pr.time_b) || (pr.place === 'remote' && s.office);
+      if (pr.kind === 'start_window' && pr.time_a && pr.time_b) return s.start < toMin(pr.time_a) || s.start > toMin(pr.time_b);
+      if (pr.kind === 'morning') return s.start > toMin('09:00');
+      if (pr.kind === 'want_close') return s.end < closeM && isoDow(s.day) <= 5;
+      if (pr.kind === 'place' && isoDow(s.day) <= 5) return (pr.place === 'remote') === s.office;
       return false;
     });
     if (broken.length) issues.push({ day: broken[0]!.day, person_id: pr.person_id, level: 'warn', text: `Preferenza non rispettata (${byId.get(pr.person_id)?.name}): “${pr.text}”` });
@@ -599,49 +654,10 @@ export function generate(input: {
 }
 
 /* ---------------- lettura delle preferenze scritte a mano ---------------- */
-const WD: [RegExp, number][] = [[/luned/, 1], [/marted/, 2], [/mercoled/, 3], [/gioved/, 4], [/venerd/, 5], [/sabat/, 6], [/domenic/, 7]];
-const MONTHS = ['genn', 'febb', 'marz', 'apri', 'magg', 'giug', 'lugl', 'agos', 'sett', 'otto', 'nove', 'dice'];
-
-/** Propone un vincolo dal testo dell'operatore ("riposo il 12", "il martedì entro alle 10", "no chiusure"). */
+/** primo vincolo letto dal testo (per compatibilità); parsePrefs li restituisce tutti */
 export function parsePref(text: string, month: string): Omit<Pref, 'id' | 'person_id' | 'text'> {
-  const t = text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  const [y, m] = month.split('-').map(Number);
-  let day: string | null = null;
-  let weekday: number | null = null;
-  const dm = t.match(/\b(\d{1,2})\s*(?:[/.-]\s*(\d{1,2}))?(?:\s+(genn|febb|marz|apri|magg|giug|lugl|agos|sett|otto|nove|dice)[a-z]*)?\b/);
-  const times = Array.from(t.matchAll(/\b(\d{1,2})(?:[:.](\d{2}))\b|\b(?:alle|dalle|le|entro|dopo|prima delle|fino alle)\s+(\d{1,2})(?![:.]\d)\b/g)).map((x) => {
-    const h = Number(x[1] ?? x[3]);
-    const mi = x[2] ? Number(x[2]) : 0;
-    return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
-  });
-  // giorno del mese: un numero che non è un orario
-  if (dm && !/(\d{1,2})[:.](\d{2})/.test(dm[0]) && !new RegExp(`(alle|dalle|entro|dopo|le|fino alle)\\s+${dm[1]}\\b`).test(t)) {
-    const d = Number(dm[1]);
-    const mo = dm[2] ? Number(dm[2]) : dm[3] ? MONTHS.indexOf(dm[3]) + 1 : m!;
-    if (d >= 1 && d <= 31 && mo >= 1 && mo <= 12) day = `${mo < m! && m === 12 ? y! + 1 : y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-  }
-  if (!day) for (const [re, n] of WD) if (re.test(t)) weekday = n;
-  let kind: PrefKind = 'note';
-  let time_a: string | null = null;
-  let time_b: string | null = null;
-  const range = t.match(/(\d{1,2})(?:[:.](\d{2}))?\s*(?:-|–|alle|\/)\s*(\d{1,2})(?:[:.](\d{2}))?/);
-  if (/(riposo|libero|libera|ferie|permesso|non (posso|lavoro)|off|giorno di)/.test(t)) kind = 'off';
-  else if (/(no|niente|senza|evitare|non fare)\s+(le\s+)?(chiusur|chiuder|serale|sera)/.test(t)) kind = 'no_close';
-  else if (/(no|niente|senza|evitare|non fare)\s+(le\s+)?(apertur|aprire|mattin|8)/.test(t)) kind = 'no_open';
-  else if (/(no|niente|senza)\s+(il\s+)?(weekend|sabat|domenic)/.test(t)) kind = 'no_weekend';
-  else if (/(uscire|esco|uscita|finire|staccare|entro le|fino alle|prima delle)/.test(t) && times.length) {
-    kind = 'end_by';
-    time_a = times[times.length - 1]!;
-  } else if (/(entrare|entro alle|entrata|iniziare|inizio|dopo le|dalle|non prima)/.test(t) && times.length) {
-    kind = 'start_after';
-    time_a = times[0]!;
-  } else if (range && /(turno|fare|vorrei|preferi)/.test(t)) {
-    kind = 'shift';
-    time_a = `${range[1]!.padStart(2, '0')}:${range[2] ?? '00'}`;
-    time_b = `${range[3]!.padStart(2, '0')}:${range[4] ?? '00'}`;
-  }
-  if (kind === 'off' && !day && weekday === null) kind = 'note';
-  return { kind, day, weekday, time_a, time_b };
+  const p = parsePrefs(text, month)[0]!;
+  return { kind: p.kind, day: p.day, weekday: p.weekday, time_a: p.time_a, time_b: p.time_b };
 }
 
 /* ---------------- profili dallo storico ---------------- */

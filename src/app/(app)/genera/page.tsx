@@ -25,7 +25,7 @@ export default async function GeneraPage({ searchParams }: { searchParams: { m?:
   const rangeEnd = addDays(weekStart(addDays(next, -1)), 7);
 
   const [{ data: people }, { data: acts }, { data: dts }, { data: prefs }, { data: pub }, events] = await Promise.all([
-    supabase.from('people').select('id, full_name, role, active, shift_hours, days_per_week, gen_exclude, can_weekend, team, contract').eq('active', true).order('full_name'),
+    supabase.from('people').select('id, full_name, email, aliases, role, active, shift_hours, days_per_week, gen_exclude, can_weekend, team, contract').eq('active', true).order('full_name'),
     supabase.from('activity_types').select('*').order('sort_order'),
     supabase.from('day_types').select('id, name, color, place, archived').order('sort_order'),
     supabase.from('gen_preferences').select('*').eq('month', month).order('created_at'),
@@ -103,7 +103,7 @@ export default async function GeneraPage({ searchParams }: { searchParams: { m?:
       lunchActivityId={settings.lunch_activity_id ?? null}
       snapMinutes={settings.snap_minutes}
       people={(people ?? []).map((p) => ({
-        id: p.id as string, name: p.full_name as string, role: p.role as string, team: p.team as string | null,
+        id: p.id as string, name: p.full_name as string, email: (p.email ?? null) as string | null, role: p.role as string, team: p.team as string | null,
         shift_hours: p.shift_hours === null ? null : Number(p.shift_hours), days_per_week: p.days_per_week as number | null,
         gen_exclude: !!p.gen_exclude, can_weekend: p.can_weekend !== false,
       }))}

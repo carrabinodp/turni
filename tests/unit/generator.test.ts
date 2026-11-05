@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generate, parsePref, profileFromHistory, withGenDefaults, toMin, isoWeekday, type GenPerson, type Pref } from '../../src/lib/generator';
+import { generate, parsePref, parsePrefs, profileFromHistory, withGenDefaults, toMin, isoWeekday, type GenPerson, type Pref } from '../../src/lib/generator';
 
 const people: GenPerson[] = [
   ...Array.from({ length: 18 }, (_, i) => ({ id: `f${i}`, name: `Full ${i}`, shiftHours: 9, daysPerWeek: 5, canWeekend: true })),
@@ -156,4 +156,59 @@ test('regole particolari: ingresso massimo, ufficio, turno fisso, settimana lung
     } else assert.equal(f.length, 5);
   }
   assert.ok(of('fra').some((s) => isoWeekday(s.day) >= 6), 'Francesca fa almeno un weekend nel mese');
+});
+
+test('preferenze del modulo Google (dicembre)', () => {
+  const m = '2026-12';
+  const k = (t: string) => parsePrefs(t, m).map((p) => [p.kind, p.day?.slice(5) ?? p.weekday ?? null, p.time_a, p.time_b, p.place ?? null, p.alt_day?.slice(5) ?? null, !!p.outside]);
+  assert.deepEqual(k('turno 9-9.30/18-18.30 con solita pausa 13-14 per via della stanza condivisa'), [['start_window', null, '09:00', '09:30', null, null, false], ['lunch_at', null, '13:00', '14:00', null, null, false]]);
+  assert.deepEqual(k('18/12 mattina please'), [['morning', '12-18', null, null, null, null, false]]);
+  assert.deepEqual(k('09.00-15.00'), [['week_shift', null, '09:00', '15:00', null, null, false]]);
+  assert.deepEqual(k('SE POSSIBILE NON LAVORARE SABATO 26/12/2026 E DOMENICA 27/12/2026').map((x) => x.slice(0, 2)), [['off', '12-26'], ['off', '12-27']]);
+  assert.deepEqual(k('mercoledi 16 preferirei turno 08.00-12.00 in smart'), [['shift', '12-16', '08:00', '12:00', 'remote', null, false]]);
+  assert.deepEqual(k('30/10').map((x) => x[6]), [true]);
+  assert.deepEqual(k('se devo fare il sabato intero  chiedo il: 12/12').map((x) => x.slice(0, 2)), [['sat_pick', '12-12']]);
+  assert.deepEqual(k('02/12 turno di chiusura').map((x) => x.slice(0, 2)), [['want_close', '12-02']]);
+  assert.deepEqual(k('se il 24 non posso fare ferie chiedo possibilmente turno  8-12').map((x) => x.slice(0, 4)), [['shift', '12-24', '08:00', '12:00']]);
+  assert.deepEqual(k('AVERE WE LIBERI NEL MESE- Disponibile a lavorare se necassario 5-12-13-19 (il 19 entro le 18)').map((x) => x.slice(0, 3)), [
+    ['no_weekend', null, null], ['weekend_ok', '12-05', null], ['weekend_ok', '12-12', null], ['weekend_ok', '12-13', null], ['weekend_ok', '12-19', null], ['end_by', '12-19', '18:00'],
+  ]);
+  assert.deepEqual(k('riposo il 5 se non avrò riposo il 15').map((x) => [x[0], x[1], x[5]]), [['off', '12-05', '12-15']]);
+  assert.deepEqual(k('no 8').map((x) => x.slice(0, 2)), [['off', '12-08']]);
+  assert.deepEqual(k('11/12 ore 8-17 in smart'), [['shift', '12-11', '08:00', '17:00', 'remote', null, false]]);
+  assert.deepEqual(k('domenica 20 riposo').map((x) => x.slice(0, 2)), [['off', '12-20']]);
+  assert.deepEqual(k('Il mercoledì sera ho il corso di pilates, chiedo gentilmente di non fare chiusura. Grazie').map((x) => x.slice(0, 2)), [['no_close', 3]]);
+});
+
+test('il generatore applica le nuove preferenze', () => {
+  const P = (id: string, person_id: string, kind: Pref['kind'], extra: Partial<Pref> = {}): Pref => ({ id, person_id, text: kind, kind, day: null, weekday: null, time_a: null, time_b: null, ...extra });
+  const prefs: Pref[] = [
+    P('a', 'f3', 'morning', { day: '2027-02-10' }),
+    P('b', 'f4', 'want_close', { day: '2027-02-09' }),
+    P('c', 'p0', 'week_shift', { time_a: '09:00', time_b: '15:00' }),
+    P('d', 'p0', 'week_shift', { time_a: '10:00', time_b: '16:00' }),
+    P('e', 'f5', 'start_window', { time_a: '09:00', time_b: '09:30' }),
+    P('f', 'f5', 'lunch_at', { time_a: '13:00', time_b: '14:00' }),
+    P('g', 'f6', 'shift', { day: '2027-02-11', time_a: '08:00', time_b: '17:00', place: 'remote' }),
+    P('h', 'f7', 'off', { day: '2027-02-15' }),
+    P('i', 'f7', 'off', { day: '2027-02-05', alt_for: 'h' }),
+    P('j', 'f8', 'no_weekend'),
+    P('k', 'f8', 'weekend_ok', { day: '2027-02-13' }),
+  ];
+  const r = run(prefs);
+  const on = (id: string, d: string) => r.shifts.find((s) => s.person_id === id && s.day === d);
+  assert.ok(on('f3', '2027-02-10')!.start <= toMin('09:00'));
+  assert.equal(on('f4', '2027-02-09')!.end, toMin('20:00'));
+  const p0 = r.shifts.filter((s) => s.person_id === 'p0' && isoWeekday(s.day) <= 5);
+  for (const w of ['2027-02-01', '2027-02-08']) {
+    const wk = p0.filter((s) => s.day >= w && s.day < (w === '2027-02-01' ? '2027-02-06' : '2027-02-13'));
+    assert.equal(new Set(wk.map((s) => s.start)).size, 1, 'stessa fascia tutta la settimana');
+  }
+  assert.notEqual(p0.find((s) => s.day < '2027-02-06')!.start, p0.find((s) => s.day >= '2027-02-08' && s.day < '2027-02-13')!.start, 'settimana dopo, fascia diversa');
+  assert.ok(r.shifts.filter((s) => s.person_id === 'f5' && isoWeekday(s.day) <= 5).every((s) => s.start >= toMin('09:00') && s.start <= toMin('09:30') && s.lunch === toMin('13:00')));
+  const g = on('f6', '2027-02-11')!;
+  assert.deepEqual([g.start, g.end, g.office], [toMin('08:00'), toMin('17:00'), false]);
+  assert.ok(!on('f7', '2027-02-15'), 'riposo principale dato');
+  assert.ok(r.shifts.filter((s) => s.person_id === 'f8' && isoWeekday(s.day) >= 6).every((s) => s.day === '2027-02-13'), 'weekend solo nel giorno disponibile');
+  assert.equal(r.issues.filter((i) => i.text.startsWith('Preferenza')).length, 0, JSON.stringify(r.issues.filter((i) => i.text.startsWith('Preferenza'))));
 });
