@@ -10,7 +10,7 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 export default async function MyCalendarPage({ searchParams }: { searchParams: { d?: string; v?: string; w?: string } }) {
-  const { supabase, me, tz } = await getSession();
+  const { supabase, me, tz, settings } = await getSession();
   const today = todayIn(tz);
   const view = searchParams.v === 'day' ? 'day' : searchParams.v === 'month' ? 'month' : 'week';
   const date = isValidDate(searchParams.d) ? searchParams.d : isValidDate(searchParams.w) ? searchParams.w : today;
@@ -30,10 +30,10 @@ export default async function MyCalendarPage({ searchParams }: { searchParams: {
   }
   // per gli scambi servono anche i turni dei colleghi nelle prossime settimane
   const horizon = addDays(today, 42);
-  const qFrom = from < today ? from : today;
+  const qFrom = from < weekStart(today) ? from : weekStart(today);
   const qTo = to > horizon ? to : horizon;
 
-  const [{ data: ev }, { data: acts }, { data: people }, { data: reqs }, { data: pub }, { data: dts }, { data: mks }, { data: cal }] = await Promise.all([
+  const [{ data: ev }, { data: acts }, { data: people }, { data: reqs }, { data: pub }, { data: dts }, { data: mks }, { data: cal }, { data: futureMarks }] = await Promise.all([
     fetchAll<EventRow>((a, b) =>
       supabase
         .from('events')
@@ -48,9 +48,10 @@ export default async function MyCalendarPage({ searchParams }: { searchParams: {
     supabase.from('people').select('id, full_name, user_id, role').eq('active', true).order('full_name'),
     supabase.from('requests').select('*').in('status', ['pending_peer', 'open', 'pending_manager']),
     supabase.from('schedule_weeks').select('week_start').gte('week_start', weekStart(qFrom)).lt('week_start', qTo),
-    supabase.from('day_types').select('id, name, color'),
+    supabase.from('day_types').select('id, name, color, place, archived, sort_order').order('sort_order'),
     supabase.from('day_marks').select('day, day_type_id').eq('person_id', me.id).gte('day', from).lt('day', to),
     supabase.rpc('my_calendar_status'),
+    supabase.from('day_marks').select('day, day_type_id').eq('person_id', me.id).gte('day', weekStart(today)).lt('day', qTo),
   ]);
 
   const activities = (acts ?? []) as Activity[];
@@ -95,6 +96,17 @@ export default async function MyCalendarPage({ searchParams }: { searchParams: {
       busyDays: Array.from(shifts.values()).filter((s) => s.person_id === p.id).map((s) => s.day),
     }));
 
+  // ufficio/smart: i miei giorni di lavoro pubblicati da oggi in poi
+  const markOn = new Map((futureMarks ?? []).map((m) => [m.day as string, m.day_type_id as string]));
+  const placeDays = Array.from(shifts.values())
+    .filter((sh) => sh.person_id === me.id && Number.isFinite(sh.start) && sh.day >= weekStart(today) && published.has(weekStart(sh.day)))
+    .sort((a, b) => a.day.localeCompare(b.day))
+    .map((sh) => ({ day: sh.day, text: shiftText(sh, tz), typeId: markOn.get(sh.day) ?? null, past: sh.day < today }));
+  const pendingPlace = open
+    .filter((r) => r.kind === 'place' && r.requester_id === me.id)
+    .flatMap((r) => [r.day_a, r.day_b])
+    .filter(Boolean) as string[];
+
   const weeks: string[] = [];
   for (let w = weekStart(from); w < to; w = addDays(w, 7)) weeks.push(w);
   const calStatus = Array.isArray(cal) ? cal[0] ?? null : null;
@@ -119,6 +131,12 @@ export default async function MyCalendarPage({ searchParams }: { searchParams: {
         .filter((sh) => sh.person_id === me.id && Number.isFinite(sh.start) && sh.day >= today && published.has(weekStart(sh.day)) && !busyDay(me.id, sh.day))
         .map((sh) => sh.day)
         .sort()}
+      place={{
+        days: placeDays,
+        types: (dts ?? []).filter((d) => d.place && !d.archived).map((d) => ({ id: d.id as string, name: d.name as string, color: d.color as string, place: d.place as 'office' | 'remote' })),
+        pending: pendingPlace,
+        officeTarget: settings.office_days_per_week ?? 3,
+      }}
       reviewers={(people ?? []).filter((p) => p.role !== 'agent' && p.user_id && p.id !== me.id).map((p) => ({ id: p.id as string, name: p.full_name as string }))}
     />
   );

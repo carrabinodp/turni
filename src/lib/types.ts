@@ -1,6 +1,6 @@
 export type Role = 'agent' | 'team_lead' | 'manager' | 'admin';
 export type ActivityKind = 'work' | 'break' | 'absence';
-export type RequestKind = 'swap' | 'give' | 'time_off' | 'change';
+export type RequestKind = 'swap' | 'give' | 'time_off' | 'change' | 'place';
 export type RequestStatus =
   | 'pending_peer'
   | 'open'
@@ -24,6 +24,7 @@ export interface Settings {
   lunch_activity_id?: string | null;
   forecast_policy?: Partial<import('./forecast').ForecastPolicy> | null;
   forecast_activity_ids?: string[] | null;
+  office_days_per_week?: number | null;
 }
 
 export interface Person {
@@ -60,6 +61,7 @@ export interface DayType {
   aliases: string[];
   sort_order: number;
   archived: boolean;
+  place?: 'office' | 'remote' | null;
 }
 
 export interface DayMark {
@@ -98,6 +100,9 @@ export interface RequestRow {
   decided_at: string | null;
   decision_note: string | null;
   created_at: string;
+  day_type_a?: string | null;
+  day_type_b?: string | null;
+  reviewer_id?: string | null;
 }
 
 export const ROLE_LABEL: Record<Role, string> = {
@@ -114,6 +119,7 @@ export const KIND_REQ_LABEL: Record<RequestKind, string> = {
   give: 'Cessione turno',
   time_off: 'Assenza',
   change: 'Richiesta di modifica',
+  place: 'Ufficio / smart',
 };
 
 export const KIND_LABEL: Record<ActivityKind, string> = {

@@ -49,8 +49,16 @@ export function describeRequest(
   acts: Map<string, Activity>,
   shifts: Map<string, DayShift>,
   tz: string,
+  dayTypes: Map<string, string> = new Map(),
 ): string {
   const n = (id: string | null) => (id ? firstName(names.get(id) ?? '?') : '?');
+  if (r.kind === 'place') {
+    const t = (id?: string | null) => (id ? dayTypes.get(id) ?? '?' : '?').toLowerCase();
+    const a = `${fmtDay(r.day_a!, 'EEE d MMM')} in ${t(r.day_type_a)}`;
+    return r.day_b
+      ? `${n(r.requester_id)}: ${a}, recupera ${fmtDay(r.day_b, 'EEE d MMM')} in ${t(r.day_type_b)}`
+      : `${n(r.requester_id)}: ${a}, senza recupero`;
+  }
   if (r.kind === 'swap') {
     const a = shifts.get(`${r.requester_id}|${r.day_a}`) ?? shifts.get(`${r.target_id}|${r.day_a}`);
     const b = shifts.get(`${r.target_id}|${r.day_b}`) ?? shifts.get(`${r.requester_id}|${r.day_b}`);

@@ -140,6 +140,8 @@ export async function decide(id: string, approve: boolean, note: string, force =
   const title =
     r.kind === 'time_off'
       ? `La tua richiesta di assenza è stata ${outcome}a`
+      : r.kind === 'place'
+        ? `La richiesta ufficio/smart è stata ${outcome}a`
       : r.kind === 'swap'
         ? `Lo scambio turni è stato ${outcome}o`
         : `La cessione del turno è stata ${outcome}a`;
@@ -150,6 +152,24 @@ export async function decide(id: string, approve: boolean, note: string, force =
   });
   if (approve) await syncCalendars([r.requester_id, r.target_id]);
   return done(approve ? 'Approvata: turni aggiornati' : 'Richiesta rifiutata');
+}
+
+export async function createPlace(dayA: string, typeA: string, dayB: string | null, note: string, reviewer: string | null): Promise<Res> {
+  const { supabase, me } = await getSession();
+  const { data, error } = await supabase.rpc('request_place', {
+    p_day_a: dayA, p_type_a: typeA, p_day_b: dayB, p_note: note || null, p_reviewer: reviewer,
+  });
+  if (error) return { ok: false, error: error.message };
+  const r = data as RequestRow;
+  const { data: dts } = await supabase.from('day_types').select('id, name').in('id', [r.day_type_a, r.day_type_b].filter(Boolean) as string[]);
+  const tn = (id?: string | null) => (dts ?? []).find((d) => d.id === id)?.name?.toLowerCase() ?? '';
+  const to = reviewer ? [reviewer] : (await managerIds()).filter((id) => id !== me.id);
+  await notify(to, {
+    title: `Ufficio/smart: richiesta da ${firstName(me.full_name)}`,
+    body: `${fmtDay(dayA, 'EEEE d MMM')} in ${tn(r.day_type_a)}${dayB ? `, recupera ${fmtDay(dayB, 'EEEE d MMM')} in ${tn(r.day_type_b)}` : ', senza recupero'}${note ? `\n“${note}”` : ''}`,
+    url: '/richieste',
+  });
+  return done(reviewer ? 'Richiesta inviata al responsabile' : 'Richiesta inviata ai responsabili');
 }
 
 export async function createChange(day: string, note: string): Promise<Res> {

@@ -238,6 +238,14 @@ export default function DevPreview({ screen }: { screen: string }) {
                 calendarConnected={false}
                 swapDays={Object.keys(days).filter((d) => d >= today).sort()}
                 reviewers={[{ id: 'p0', name: 'Carlo Carrabino' }, { id: 'p1', name: 'Andrea Pettineo' }]}
+                place={{
+                  days: Array.from({ length: 7 }, (_, i) => addDays(weekStart(today), i))
+                    .filter((d) => days[d])
+                    .map((d, i) => ({ day: d, text: '09:00–18:00', typeId: new Date(d + 'T12:00:00Z').getUTCDay() % 6 === 0 ? 'sw' : i % 5 < 3 ? 'uff' : 'sw', past: d < today })),
+                  types: [{ id: 'uff', name: 'Ufficio', color: '#dbe7ff', place: 'office' }, { id: 'sw', name: 'Smart working', color: '#fff27a', place: 'remote' }],
+                  pending: [],
+                  officeTarget: 3,
+                }}
                 swapSearch={async (dayA) => {
                   const iso = (d: string, h: string) => new Date(localToUtc(d, h, TZ)).toISOString();
                   const bl = (d: string, s0: string, e0: string, main: string, color: string) => [

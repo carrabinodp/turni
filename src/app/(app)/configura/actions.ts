@@ -42,6 +42,7 @@ export async function saveSettings(s: {
   allowed_domains: string;
   admin_emails: string;
   min_rest_hours: number;
+  office_days_per_week: number;
   split_gap_hours: number;
   snap_minutes: number;
   timezone: string;
@@ -56,6 +57,7 @@ export async function saveSettings(s: {
       allowed_domains: list(s.allowed_domains),
       admin_emails: list(s.admin_emails),
       min_rest_hours: s.min_rest_hours,
+      office_days_per_week: Math.max(0, Math.min(5, Math.round(s.office_days_per_week))),
       split_gap_hours: s.split_gap_hours,
       snap_minutes: s.snap_minutes,
       timezone: s.timezone,
@@ -74,6 +76,7 @@ export interface DayTypeInput {
   aliases: string;
   archived: boolean;
   sort_order: number;
+  place: '' | 'office' | 'remote';
 }
 
 export async function saveDayType(d: DayTypeInput): Promise<R> {
@@ -84,6 +87,7 @@ export async function saveDayType(d: DayTypeInput): Promise<R> {
     aliases: d.aliases.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
     archived: d.archived,
     sort_order: d.sort_order,
+    place: d.place || null,
   };
   if (!row.name) return { ok: false, error: 'Il nome è obbligatorio' };
   const { error } = d.id

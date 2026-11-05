@@ -36,10 +36,10 @@ export default function ConfigForms({ activities, dayTypes, settings, isAdmin }:
         </div>
         <div className="table-wrap">
           <table className="table">
-            <thead><tr><th>Colore</th><th>Nome</th><th>Nomi alternativi (per l’import)</th><th>Ordine</th><th>Archiviato</th><th /></tr></thead>
+            <thead><tr><th>Colore</th><th>Nome</th><th>Dove</th><th>Nomi alternativi (per l’import)</th><th>Ordine</th><th>Archiviato</th><th /></tr></thead>
             <tbody>
-              {dayTypes.map((d) => <DayTypeRow key={d.id} initial={{ id: d.id, name: d.name, color: d.color, aliases: d.aliases.join(', '), archived: d.archived, sort_order: d.sort_order }} />)}
-              <DayTypeRow key={`new-${dayTypes.length}`} initial={{ name: '', color: '#ffe0b2', aliases: '', archived: false, sort_order: Math.max(0, ...dayTypes.map((d) => d.sort_order)) + 10 }} />
+              {dayTypes.map((d) => <DayTypeRow key={d.id} initial={{ id: d.id, name: d.name, color: d.color, aliases: d.aliases.join(', '), archived: d.archived, sort_order: d.sort_order, place: d.place ?? '' }} />)}
+              <DayTypeRow key={`new-${dayTypes.length}`} initial={{ name: '', color: '#ffe0b2', aliases: '', place: '', archived: false, sort_order: Math.max(0, ...dayTypes.map((d) => d.sort_order)) + 10 }} />
             </tbody>
           </table>
         </div>
@@ -86,6 +86,7 @@ function SettingsForm({ settings, isAdmin }: { settings: Settings; isAdmin: bool
     allowed_domains: settings.allowed_domains.join(', '),
     admin_emails: settings.admin_emails.join(', '),
     min_rest_hours: Number(settings.min_rest_hours),
+    office_days_per_week: Number(settings.office_days_per_week ?? 3),
     split_gap_hours: Number(settings.split_gap_hours),
     snap_minutes: settings.snap_minutes,
     timezone: settings.timezone,
@@ -103,6 +104,7 @@ function SettingsForm({ settings, isAdmin }: { settings: Settings; isAdmin: bool
           </div>
           <div className="row">
             <label className="field"><span>Riposo minimo tra turni (ore)</span><input id="s-rest" className="input" type="number" step="0.5" min={0} max={24} value={s.min_rest_hours} onChange={(e) => setS({ ...s, min_rest_hours: Number(e.target.value) })} style={{ width: 120 }} /></label>
+            <label className="field"><span>Giorni in ufficio a settimana (lun–ven)</span><input id="s-office" className="input" type="number" min={0} max={5} value={s.office_days_per_week} onChange={(e) => setS({ ...s, office_days_per_week: Number(e.target.value) })} style={{ width: 120 }} /></label>
             <label className="field"><span>Pausa oltre cui il turno è “spezzato” (ore)</span><input id="s-gap" className="input" type="number" step="0.5" min={0} max={12} value={s.split_gap_hours} onChange={(e) => setS({ ...s, split_gap_hours: Number(e.target.value) })} style={{ width: 120 }} /></label>
             <label className="field"><span>Aggancio in timeline</span>
               <select id="s-snap" className="select" value={s.snap_minutes} onChange={(e) => setS({ ...s, snap_minutes: Number(e.target.value) })}>
@@ -131,6 +133,13 @@ function DayTypeRow({ initial }: { initial: DayTypeInput }) {
     <tr style={d.archived ? { opacity: 0.55 } : undefined}>
       <td><input id={`d-color-${k}`} type="color" value={d.color} onChange={(e) => setD({ ...d, color: e.target.value })} style={{ width: 36, height: 30, border: 0, background: 'none', padding: 0 }} aria-label="Colore" /></td>
       <td><input id={`d-name-${k}`} className="input" value={d.name} placeholder={isNew ? 'Nuovo tipo…' : ''} onChange={(e) => setD({ ...d, name: e.target.value })} style={{ minWidth: 140 }} /></td>
+      <td>
+        <select id={`d-place-${k}`} className="select" value={d.place} onChange={(e) => setD({ ...d, place: e.target.value as DayTypeInput['place'] })} aria-label="Dove">
+          <option value="">—</option>
+          <option value="office">In ufficio</option>
+          <option value="remote">Da remoto</option>
+        </select>
+      </td>
       <td><input id={`d-alias-${k}`} className="input" value={d.aliases} placeholder="smart, sw" onChange={(e) => setD({ ...d, aliases: e.target.value })} style={{ minWidth: 150 }} /></td>
       <td><input id={`d-order-${k}`} className="input" type="number" value={d.sort_order} onChange={(e) => setD({ ...d, sort_order: Number(e.target.value) })} style={{ width: 70 }} /></td>
       <td style={{ textAlign: 'center' }}>{!isNew && <input id={`d-arch-${k}`} type="checkbox" checked={d.archived} onChange={(e) => setD({ ...d, archived: e.target.checked })} />}</td>

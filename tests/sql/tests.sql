@@ -449,4 +449,66 @@ do $$ begin
 end $$;
 reset role;
 
+-- ---- 0007: richieste ufficio/smart
+reset role;
+select set_config('app.bulk', 'on', false);
+insert into schedule_weeks (week_start) values ('2027-01-11') on conflict do nothing;
+insert into events (person_id, activity_id, starts_at, ends_at)
+select p.id, (select id from activity_types where name = 'Telefono'),
+       (d::date + time '09:00') at time zone 'Europe/Rome', (d::date + time '17:00') at time zone 'Europe/Rome'
+from people p, generate_series('2027-01-11'::date, '2027-01-15'::date, interval '1 day') d
+where p.email = 'giulia.rossi@azienda.it';
+insert into day_marks (person_id, day, day_type_id)
+select p.id, d::date, (select id from day_types where name = case when extract(isodow from d) <= 3 then 'Ufficio' else 'Smart working' end)
+from people p, generate_series('2027-01-11'::date, '2027-01-15'::date, interval '1 day') d
+where p.email = 'giulia.rossi@azienda.it';
+select set_config('app.bulk', 'off', false);
+do $$ begin
+  assert (select place from day_types where name = 'Ufficio') = 'office', 'Ufficio = in sede';
+  assert (select place from day_types where name = 'Smart working') = 'remote', 'Smart = da remoto';
+  assert (select place from day_types where name = 'Da verificare') is null, 'Da verificare senza luogo';
+end $$;
+
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+set role authenticated;
+do $$
+declare
+  sw uuid := (select id from day_types where name = 'Smart working');
+  uf uuid := (select id from day_types where name = 'Ufficio');
+  r1 requests; r2 requests;
+begin
+  -- smart mercoledì, recupero in ufficio giovedì: la regola dei 3 giorni torna
+  r1 := request_place('2027-01-13', sw, '2027-01-14', 'Visita medica');
+  assert r1.status = 'pending_manager' and r1.day_type_b = uf, 'scambio ufficio/smart in attesa del manager';
+  assert cardinality(request_preview(r1.id)) = 0, 'con recupero nessun avviso';
+  -- smart lunedì senza recupero: parte lo stesso, con avviso
+  r2 := request_place('2027-01-11', sw, null, 'Sciopero dei mezzi');
+  assert (request_preview(r2.id))[1] like '%2 giorni in ufficio invece di 3%', 'avviso giorni in ufficio';
+  begin
+    perform request_place('2027-01-13', sw);
+    raise exception 'doveva fallire';
+  exception when others then
+    if sqlerrm = 'doveva fallire' then raise; end if;
+  end;
+  begin
+    perform request_place('2027-01-14', sw);   -- giovedì è già smart
+    raise exception 'doveva fallire';
+  exception when others then
+    if sqlerrm = 'doveva fallire' then raise; end if;
+  end;
+end $$;
+reset role;
+
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000c', false);
+set role authenticated;
+select request_decide((select id from requests where kind::text = 'place' and day_a = '2027-01-13'), true);
+reset role;
+do $$
+declare g uuid := (select id from people where email = 'giulia.rossi@azienda.it');
+begin
+  assert (select t.name from day_marks m join day_types t on t.id = m.day_type_id where m.person_id = g and m.day = '2027-01-13') = 'Smart working', 'mercoledì diventa smart';
+  assert (select t.name from day_marks m join day_types t on t.id = m.day_type_id where m.person_id = g and m.day = '2027-01-14') = 'Ufficio', 'giovedì diventa ufficio';
+  assert (select count(*) from events where person_id = g and starts_at >= '2027-01-11' and starts_at < '2027-01-16') = 5, 'turni invariati';
+end $$;
+
 select 'TUTTI I TEST SQL PASSATI';

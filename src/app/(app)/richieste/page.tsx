@@ -19,11 +19,13 @@ export default async function RequestsPage() {
   const { supabase, me, tz, isManager } = await getSession();
   const since = new Date(Date.now() - 90 * 86400000).toISOString();
 
-  const [{ data: reqData }, { data: peopleData }, { data: actData }] = await Promise.all([
+  const [{ data: reqData }, { data: peopleData }, { data: actData }, { data: dtData }] = await Promise.all([
     supabase.from('requests').select('*').or(`status.in.(pending_peer,open,pending_manager),created_at.gte.${since}`).order('created_at', { ascending: false }).limit(300),
     supabase.from('people').select('id, full_name'),
     supabase.from('activity_types').select('*'),
+    supabase.from('day_types').select('id, name'),
   ]);
+  const dayTypes = new Map((dtData ?? []).map((d) => [d.id as string, d.name as string]));
   const requests = (reqData ?? []) as RequestRow[];
   const names = new Map((peopleData ?? []).map((p) => [p.id, p.full_name as string]));
   const acts = new Map(((actData ?? []) as Activity[]).map((a) => [a.id, a]));
@@ -48,12 +50,12 @@ export default async function RequestsPage() {
     );
     shifts = groupShifts(ev, Array.from(acts.values()), tz);
   }
-  const desc = (r: RequestRow) => describeRequest(r, names, acts, shifts, tz);
+  const desc = (r: RequestRow) => describeRequest(r, names, acts, shifts, tz, dayTypes);
 
   const toDecide = isManager ? requests.filter((r) => r.status === 'pending_manager') : [];
   const datesOf = (r: RequestRow) => {
     if (r.kind === 'time_off') return r.from_date === r.to_date ? fmtDay(r.from_date!, 'EEE d MMM') : `${fmtDay(r.from_date!, 'd MMM')} – ${fmtDay(r.to_date!, 'd MMM')}`;
-    if (r.kind === 'swap' && r.day_b && r.day_b !== r.day_a) return `${fmtDay(r.day_a!, 'EEE d MMM')}, ${fmtDay(r.day_b, 'EEE d MMM')}`;
+    if ((r.kind === 'swap' || r.kind === 'place') && r.day_b && r.day_b !== r.day_a) return `${fmtDay(r.day_a!, 'EEE d MMM')}, ${fmtDay(r.day_b, 'EEE d MMM')}`;
     return fmtDay(r.day_a!, 'EEE d MMM');
   };
   const forMe = requests.filter((r) => r.status === 'pending_peer' && r.target_id === me.id);
