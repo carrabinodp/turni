@@ -225,3 +225,42 @@ test('token del calendario cifrato e decifrabile', async () => {
   process.env.CALENDAR_TOKEN_KEY = 'altra-chiave';
   assert.throws(() => decrypt(blob), 'chiave sbagliata non decifra');
 });
+
+test('riepilogo mensile', async () => {
+  const { monthlySummary, italianHolidays } = await import('../../src/lib/report');
+  const { localToUtc } = await import('../../src/lib/time');
+  const at = (d: string, h: string) => localToUtc(d, h, 'Europe/Rome');
+  const acts = [
+    { id: 'tel', name: 'Telefono', kind: 'work' as const },
+    { id: 'form', name: 'Formazione', kind: 'work' as const },
+    { id: 'pausa', name: 'Pausa', kind: 'break' as const },
+    { id: 'pranzo', name: 'Pranzo', kind: 'break' as const },
+    { id: 'ferie', name: 'Ferie', kind: 'absence' as const },
+    { id: 'perm', name: 'Permesso', kind: 'absence' as const },
+  ];
+  const b = (p: string, a: string, d: string, s: string, e: string) => ({ person_id: p, activity_id: a, s: at(d, s), e: at(d, e) });
+  const blocks = [
+    b('a', 'tel', '2026-11-02', '09:00', '18:00'),
+    b('a', 'pausa', '2026-11-02', '11:00', '11:15'),
+    b('a', 'pranzo', '2026-11-02', '13:00', '14:00'),
+    b('a', 'form', '2026-11-02', '16:00', '17:00'),
+    b('a', 'tel', '2026-11-03', '09:00', '15:00'),
+    b('a', 'perm', '2026-11-03', '09:00', '11:00'), // permesso a ore
+    { person_id: 'a', activity_id: 'ferie', s: at('2026-11-04', '00:00'), e: at('2026-11-05', '00:00') }, // ferie giornata intera
+    b('a', 'tel', '2026-11-01', '10:00', '14:00'), // domenica e Ognissanti
+    b('a', 'tel', '2026-10-31', '09:00', '18:00'), // fuori mese
+  ];
+  const [s] = monthlySummary(blocks, acts, [{ person_id: 'a', day: '2026-11-02', type: 'Smart working' }], ['a'], '2026-11', 'Europe/Rome');
+  assert.equal(s!.daysWorked, 3);
+  assert.equal(s!.workedMin, 8 * 60 + 4 * 60 + 4 * 60); // 9-18 meno pranzo, 9-15 meno 2h permesso, 10-14
+  assert.equal(s!.breakMin, 15);
+  assert.equal(s!.lunchMin, 60);
+  assert.equal(s!.absenceDays['Ferie'], 1);
+  assert.equal(s!.absenceMin['Permesso'], 120);
+  assert.equal(s!.sundaysWorked, 1);
+  assert.equal(s!.holidaysWorked, 1);
+  assert.equal(s!.dayTypes['Smart working'], 1);
+  assert.equal(s!.activityMin['Formazione'], 60);
+  assert.equal(s!.activityMin['Telefono'], 7 * 60 + 4 * 60 + 4 * 60 - 15 + 15 - 15); // 9-18 meno pranzo, pausa e formazione; 11-15; 10-14
+  assert.equal(italianHolidays(2027).get('2027-03-29'), 'Lunedì dell’Angelo');
+});

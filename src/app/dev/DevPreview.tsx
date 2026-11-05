@@ -8,6 +8,8 @@ import RequestsTable from '../(app)/richieste/RequestsTable';
 import TimeOffBoard from '../(app)/assenze/TimeOffBoard';
 import TeamTable from '../(app)/team/TeamTable';
 import Settings from '../(app)/impostazioni/Settings';
+import ReportView from '../(app)/report/ReportView';
+import { monthlySummary } from '@/lib/report';
 import type { Activity, DayMark, DayType, EventRow } from '@/lib/types';
 import { localToUtc, todayIn, weekStart, addDays } from '@/lib/time';
 
@@ -77,7 +79,31 @@ export default function DevPreview({ screen }: { screen: string }) {
     <div className="shell">
       <Sidebar me={{ name: 'Carlo Carrabino', role: 'admin' }} orgName="Turni Supporto" isManager isAdmin counts={{ requests: 2, notifications: 1 }} />
       <main className="main">
-        {screen === 'requests' ? (
+        {screen === 'report' ? (
+          (() => {
+            const month = '2026-10';
+            const dates = Array.from({ length: 31 }, (_, i) => `2026-10-${String(i + 1).padStart(2, '0')}`);
+            const ev = buildEvents(dates);
+            const sums = monthlySummary(
+              ev.map((e) => ({ person_id: e.person_id, activity_id: e.activity_id, s: Date.parse(e.starts_at), e: Date.parse(e.ends_at) })),
+              ACTS,
+              dates.flatMap((d, i) => PEOPLE.map((p, k) => ({ person_id: p.id, day: d, type: (k + i) % 4 === 0 ? 'Smart working' : 'Ufficio' }))),
+              PEOPLE.map((p) => p.id),
+              month,
+              TZ,
+            );
+            return (
+              <ReportView
+                month={month}
+                tz={TZ}
+                people={PEOPLE.map((p) => ({ id: p.id, name: p.full_name, email: `${p.full_name.split(' ').slice(-1)[0]!.toLowerCase()}@dentalpro.it`, team: p.team, contract: p.contract, active: true }))}
+                summaries={sums}
+                activityOrder={ACTS.map((a) => ({ name: a.name, kind: a.kind, color: a.color }))}
+                dayTypeOrder={['Ufficio', 'Smart working', 'Da verificare']}
+              />
+            );
+          })()
+        ) : screen === 'requests' ? (
           <div className="page" style={{ maxWidth: 1300 }}>
             <h1>Richieste di modifica turni</h1>
             <RequestsTable

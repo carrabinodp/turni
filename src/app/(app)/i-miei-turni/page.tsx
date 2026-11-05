@@ -1,4 +1,5 @@
 import { getSession } from '@/lib/session';
+import { fetchAll } from '@/lib/fetchAll';
 import { groupShifts, shiftText } from '@/lib/shifts';
 import { addDays, dayStart, isValidDate, todayIn, weekStart } from '@/lib/time';
 import type { Activity, EventRow, RequestRow } from '@/lib/types';
@@ -33,12 +34,16 @@ export default async function MyCalendarPage({ searchParams }: { searchParams: {
   const qTo = to > horizon ? to : horizon;
 
   const [{ data: ev }, { data: acts }, { data: people }, { data: reqs }, { data: pub }, { data: dts }, { data: mks }, { data: cal }] = await Promise.all([
-    supabase
-      .from('events')
-      .select('id, person_id, activity_id, starts_at, ends_at, note, source, updated_at')
-      .gte('starts_at', new Date(dayStart(qFrom, tz)).toISOString())
-      .lt('starts_at', new Date(dayStart(qTo, tz)).toISOString())
-      .limit(20000),
+    fetchAll<EventRow>((a, b) =>
+      supabase
+        .from('events')
+        .select('id, person_id, activity_id, starts_at, ends_at, note, source, updated_at')
+        .gte('starts_at', new Date(dayStart(qFrom, tz)).toISOString())
+        .lt('starts_at', new Date(dayStart(qTo, tz)).toISOString())
+        .order('starts_at')
+        .order('id')
+        .range(a, b),
+    ).then((data) => ({ data })),
     supabase.from('activity_types').select('*').order('sort_order'),
     supabase.from('people').select('id, full_name, user_id, role').eq('active', true).order('full_name'),
     supabase.from('requests').select('*').in('status', ['pending_peer', 'open', 'pending_manager']),

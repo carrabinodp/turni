@@ -1,4 +1,5 @@
 import { getSession } from '@/lib/session';
+import { fetchAll } from '@/lib/fetchAll';
 import Timeline from '@/components/timeline/Timeline';
 import { addDays, dayStart, diffDays, isValidDate, todayIn, weekStart } from '@/lib/time';
 import type { Activity, DayMark, DayType, EventRow, Person } from '@/lib/types';
@@ -21,16 +22,21 @@ export default async function TimelinePage({ searchParams }: { searchParams: { d
   const [people, activities, events, weeks, dayTypes, marks] = await Promise.all([
     supabase.from('people').select('id, full_name, contract, user_id, team, channels').eq('active', true).order('full_name'),
     supabase.from('activity_types').select('*').order('sort_order'),
-    supabase
-      .from('events')
-      .select('id, person_id, activity_id, starts_at, ends_at, note, source, updated_at, updated_by')
-      .lt('starts_at', endIso)
-      .gt('ends_at', startIso)
-      .order('starts_at')
-      .limit(20000),
+    fetchAll<EventRow>((a, b) =>
+      supabase
+        .from('events')
+        .select('id, person_id, activity_id, starts_at, ends_at, note, source, updated_at, updated_by')
+        .lt('starts_at', endIso)
+        .gt('ends_at', startIso)
+        .order('starts_at')
+        .order('id')
+        .range(a, b),
+    ).then((data) => ({ data })),
     supabase.from('schedule_weeks').select('week_start').gte('week_start', weekStart(from)).lt('week_start', end),
     supabase.from('day_types').select('*').order('sort_order'),
-    supabase.from('day_marks').select('person_id, day, day_type_id').gte('day', from).lt('day', end).limit(20000),
+    fetchAll<DayMark>((a, b) =>
+      supabase.from('day_marks').select('person_id, day, day_type_id').gte('day', from).lt('day', end).order('day').order('person_id').range(a, b),
+    ).then((data) => ({ data })),
   ]);
 
   const evs = (events.data ?? []) as EventRow[];

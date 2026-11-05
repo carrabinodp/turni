@@ -1,4 +1,5 @@
 import { getSession } from '@/lib/session';
+import { fetchAll } from '@/lib/fetchAll';
 import { describeRequest, groupShifts } from '@/lib/shifts';
 import { addDays, dayStart, fmt, fmtDay, todayIn } from '@/lib/time';
 import { STATUS_LABEL, type Activity, type EventRow, type RequestRow } from '@/lib/types';
@@ -33,12 +34,19 @@ export default async function RequestsPage() {
   if (days.length) {
     const min = days.reduce((a, b) => (a < b ? a : b));
     const max = days.reduce((a, b) => (a > b ? a : b));
-    const { data: ev } = await supabase
-      .from('events')
-      .select('id, person_id, activity_id, starts_at, ends_at, note, source, updated_at')
-      .gte('starts_at', new Date(dayStart(min, tz)).toISOString())
-      .lt('starts_at', new Date(dayStart(addDays(max, 1), tz)).toISOString());
-    shifts = groupShifts((ev ?? []) as EventRow[], Array.from(acts.values()), tz);
+    const involved = Array.from(new Set(requests.flatMap((r) => [r.requester_id, r.target_id]).filter(Boolean) as string[]));
+    const ev = await fetchAll<EventRow>((a, b) =>
+      supabase
+        .from('events')
+        .select('id, person_id, activity_id, starts_at, ends_at, note, source, updated_at')
+        .in('person_id', involved)
+        .gte('starts_at', new Date(dayStart(min, tz)).toISOString())
+        .lt('starts_at', new Date(dayStart(addDays(max, 1), tz)).toISOString())
+        .order('starts_at')
+        .order('id')
+        .range(a, b),
+    );
+    shifts = groupShifts(ev, Array.from(acts.values()), tz);
   }
   const desc = (r: RequestRow) => describeRequest(r, names, acts, shifts, tz);
 

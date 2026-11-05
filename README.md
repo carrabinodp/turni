@@ -12,6 +12,7 @@ Sito interno per pianificare turni e attività del team, in stile "staffing time
 - **Controllo del riposo minimo** (11 h, configurabile) sul server: uno scambio che lo viola non passa.
 - **Bozza / pubblicata** per settimana: i dipendenti vedono solo le settimane pubblicate.
 - **Notifiche** in-app, email e push (anche su iPhone con il sito aggiunto alla schermata Home).
+- **Report mensile** per operatore (giorni e ore lavorate, ufficio/smart, domeniche e festivi, ferie, permessi, malattie, ore per attività) con export Excel e dettaglio giornaliero.
 - **Registro modifiche** di chi ha cambiato cosa, anche per singolo blocco ("Vedi tutte le modifiche").
 - **Calendario personale** per gli operatori (giorno / settimana / mese) con Tempo libero, Scambio turno e Richiesta di modifica.
 - **Google Calendar**: sincronizzazione automatica dei turni pubblicati, nel calendario principale o in uno separato.
