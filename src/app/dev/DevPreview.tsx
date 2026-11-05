@@ -11,6 +11,8 @@ import Settings from '../(app)/impostazioni/Settings';
 import ReportView from '../(app)/report/ReportView';
 import { monthlySummary } from '@/lib/report';
 import ForecastView from '../(app)/forecast/ForecastView';
+import GeneratorView from '../(app)/genera/GeneratorView';
+import { withGenDefaults } from '@/lib/generator';
 import { aggregate, type Call } from '@/lib/calls';
 import { phoneStaffing, dayForecast, DEFAULT_FORECAST } from '@/lib/forecast';
 import type { Activity, DayMark, DayType, EventRow } from '@/lib/types';
@@ -106,7 +108,48 @@ export default function DevPreview({ screen }: { screen: string }) {
     <div className="shell">
       <Sidebar me={{ name: 'Carlo Carrabino', role: 'admin' }} orgName="Turni Supporto" isManager isAdmin counts={{ requests: 2, notifications: 1 }} />
       <main className="main">
-        {screen.startsWith('forecast') ? (
+        {screen.startsWith('genera') ? (
+          (() => {
+            const names = ['Chiara Bellandi', 'Chiara Morise', 'Anna Ferlisi', 'Francesca Ceraolo', 'Gabriella Martorana', 'Tonia Totaro', 'Elena Gennari', 'Marta Pantano', 'Luca Guarneri', 'Sara Servetto', 'Paola Borra', 'Irene Cardigliano', 'Andrea Pettineo', 'Davide Mascitelli', 'Rita Marinacci', 'Giulia Gunia', 'Marco Puglisi', 'Vincenzo Carnevale', 'Laura Li Vigni', 'Dario Consiglio', 'Nadia Benincaso', 'Silvia Frasca', 'Barbara Pertile', 'Ilaria Burrai', 'Ugo Petrosino'];
+            const hrs = (n: string) => (/Martorana|Li Vigni|Consiglio|Benincaso|Petrosino/.test(n) ? 6 : /Totaro|Frasca/.test(n) ? 4 : 9);
+            const ppl = names.map((n, i) => ({ id: `g${i}`, name: n, role: 'agent', team: null, shift_hours: i % 7 === 3 ? null : hrs(n), days_per_week: i % 7 === 3 ? null : 5, gen_exclude: false, can_weekend: true }));
+            const id = (n: string) => ppl.find((p) => p.name.includes(n))!.id;
+            const month = addDays(today.slice(0, 8) + '01', 32).slice(0, 7);
+            const cfg = withGenDefaults({
+              rec: { pool: [{ person_id: id('Bellandi'), start: '08:30', end: '17:30' }, { person_id: id('Ferlisi'), start: '08:30', end: '17:30' }, { person_id: id('Ceraolo'), start: '08:30', end: '17:30' }, { person_id: id('Martorana'), start: '08:30', end: '14:30' }], companions: [{ when: id('Martorana'), person_id: id('Totaro'), start: '14:30', end: '18:30' }], saturday: false },
+              reclami: { pool: [id('Bellandi'), id('Morise')] },
+              activities: { phone: 'tel', rec: 'mail', reclami: 'form' },
+            });
+            return (
+              <GeneratorView
+                month={month}
+                tz={TZ}
+                today={today}
+                config={cfg}
+                officeDaysPerWeek={3}
+                breakPolicy={null}
+                breakActivityId="pausa"
+                lunchActivityId="pranzo"
+                snapMinutes={15}
+                people={ppl}
+                suggest={Object.fromEntries(ppl.map((p) => [p.id, { shiftHours: hrs(p.name), daysPerWeek: 5, samples: 40 }]))}
+                activities={ACTS.map((a) => ({ id: a.id, name: a.name, kind: a.kind, color: a.color }))}
+                dayTypes={[{ id: 'uff', name: 'Ufficio', color: '#dbe7ff', place: 'office' }, { id: 'sw', name: 'Smart working', color: '#fff27a', place: 'remote' }]}
+                prefs={[
+                  { id: 'x1', person_id: id('Gennari'), text: 'riposo il 12', kind: 'off', day: `${month}-12`, weekday: null, time_a: null, time_b: null, source: 'operator', reviewed: false, month },
+                  { id: 'x2', person_id: id('Pantano'), text: 'il martedì entrare dopo le 10', kind: 'start_after', day: null, weekday: 2, time_a: '10:00', time_b: null, source: 'operator', reviewed: true, month },
+                  { id: 'x3', person_id: id('Borra'), text: 'niente chiusure', kind: 'no_close', day: null, weekday: null, time_a: null, time_b: null, source: 'operator', reviewed: false, month },
+                ]}
+                absences={[{ person_id: id('Guarneri'), day: `${month}-14`, full: true, name: 'Ferie' }, { person_id: id('Guarneri'), day: `${month}-15`, full: true, name: 'Ferie' }]}
+                fixed={[]}
+                history={{ saturdays: {}, sundays: {}, closings: {}, openings: {}, rec: {}, reclami: {} }}
+                holidays={[]}
+                publishedWeeks={[]}
+                existingInMonth={0}
+              />
+            );
+          })()
+        ) : screen.startsWith('forecast') ? (
           (() => {
             const w = weekStart(today);
             const intervals = aggregate(fakeCalls(today), TZ, false);

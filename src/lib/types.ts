@@ -25,6 +25,7 @@ export interface Settings {
   forecast_policy?: Partial<import('./forecast').ForecastPolicy> | null;
   forecast_activity_ids?: string[] | null;
   office_days_per_week?: number | null;
+  generator?: Partial<import('./generator').GenConfig> | null;
 }
 
 export interface Person {

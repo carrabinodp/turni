@@ -11,6 +11,7 @@ import { createChange } from '../richieste/actions';
 import { SwapDialog, type Colleague } from './MyShifts';
 import SwapPanel from './SwapPanel';
 import PlaceDialog, { type PlaceInfo } from './PlaceDialog';
+import PrefsDialog, { type MyPrefs } from './PrefsDialog';
 
 export interface CalEvent {
   id: string;
@@ -50,11 +51,12 @@ export default function MyCalendar(props: {
   swapDays: string[];
   reviewers: { id: string; name: string }[];
   place?: PlaceInfo;
+  prefs?: MyPrefs;
   swapSearch?: Parameters<typeof SwapPanel>[0]['search'];
 }) {
   const { view, date, tz, today } = props;
   const router = useRouter();
-  const [dialog, setDialog] = useState<null | { kind: 'swap' | 'give' | 'change' | 'timeoff' | 'place'; day?: string }>(null);
+  const [dialog, setDialog] = useState<null | { kind: 'swap' | 'give' | 'change' | 'timeoff' | 'place' | 'prefs'; day?: string }>(null);
   const [dayMenu, setDayMenu] = useState<string | null>(null);
 
   const go = (d: string, v: View = view) => router.push(`/i-miei-turni?v=${v}&d=${d}`);
@@ -110,6 +112,7 @@ export default function MyCalendar(props: {
         <div className="row" style={{ alignItems: 'center' }}>
           <button className="btn" onClick={() => setDialog({ kind: 'timeoff' })}>Tempo libero</button>
           {props.place && <button className="btn" onClick={() => setDialog({ kind: 'place' })}>Ufficio / smart</button>}
+          {props.prefs && <button className="btn" onClick={() => setDialog({ kind: 'prefs' })}>Preferenze di {fmtDay(`${props.prefs.month}-15`, 'MMMM')}</button>}
           <button className="btn" onClick={() => setDialog({ kind: 'swap' })} disabled={!props.swapDays.length} title={props.swapDays.length ? undefined : 'Nessun turno pubblicato da scambiare'}>
             Richiesta di scambio di turno
           </button>
@@ -286,6 +289,7 @@ export default function MyCalendar(props: {
           onClose={() => setDialog(null)}
         />
       )}
+      {dialog?.kind === 'prefs' && props.prefs && <PrefsDialog prefs={props.prefs} onClose={() => setDialog(null)} />}
       {dialog?.kind === 'place' && props.place && <PlaceDialog info={props.place} day={dialog.day} reviewers={props.reviewers} onClose={() => setDialog(null)} />}
       {dialog?.kind === 'change' && <ChangeDialog day={dialog.day ?? today} today={today} onClose={() => setDialog(null)} />}
       {dialog?.kind === 'timeoff' && (

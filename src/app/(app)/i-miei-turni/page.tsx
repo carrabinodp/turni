@@ -33,7 +33,7 @@ export default async function MyCalendarPage({ searchParams }: { searchParams: {
   const qFrom = from < weekStart(today) ? from : weekStart(today);
   const qTo = to > horizon ? to : horizon;
 
-  const [{ data: ev }, { data: acts }, { data: people }, { data: reqs }, { data: pub }, { data: dts }, { data: mks }, { data: cal }, { data: futureMarks }] = await Promise.all([
+  const [{ data: ev }, { data: acts }, { data: people }, { data: reqs }, { data: pub }, { data: dts }, { data: mks }, { data: cal }, { data: futureMarks }, { data: myPrefs }] = await Promise.all([
     fetchAll<EventRow>((a, b) =>
       supabase
         .from('events')
@@ -52,6 +52,7 @@ export default async function MyCalendarPage({ searchParams }: { searchParams: {
     supabase.from('day_marks').select('day, day_type_id').eq('person_id', me.id).gte('day', from).lt('day', to),
     supabase.rpc('my_calendar_status'),
     supabase.from('day_marks').select('day, day_type_id').eq('person_id', me.id).gte('day', weekStart(today)).lt('day', qTo),
+    supabase.from('gen_preferences').select('id, text, reviewed, source').eq('person_id', me.id).eq('month', addDays(today.slice(0, 8) + '01', 32).slice(0, 7)).order('created_at'),
   ]);
 
   const activities = (acts ?? []) as Activity[];
@@ -131,6 +132,7 @@ export default async function MyCalendarPage({ searchParams }: { searchParams: {
         .filter((sh) => sh.person_id === me.id && Number.isFinite(sh.start) && sh.day >= today && published.has(weekStart(sh.day)) && !busyDay(me.id, sh.day))
         .map((sh) => sh.day)
         .sort()}
+      prefs={{ month: addDays(today.slice(0, 8) + '01', 32).slice(0, 7), list: (myPrefs ?? []).filter((p) => p.source === 'operator') as { id: string; text: string; reviewed: boolean }[] }}
       place={{
         days: placeDays,
         types: (dts ?? []).filter((d) => d.place && !d.archived).map((d) => ({ id: d.id as string, name: d.name as string, color: d.color as string, place: d.place as 'office' | 'remote' })),

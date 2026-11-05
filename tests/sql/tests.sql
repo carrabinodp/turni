@@ -511,4 +511,78 @@ begin
   assert (select count(*) from events where person_id = g and starts_at >= '2027-01-11' and starts_at < '2027-01-16') = 5, 'turni invariati';
 end $$;
 
+-- ---- 0008: generatore
+-- operatore: 3 preferenze al mese, solo sue, non può cambiare il proprio profilo
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+set role authenticated;
+do $$
+declare g uuid := current_person_id();
+begin
+  insert into gen_preferences (month, person_id, text, kind, reviewed) values ('2027-02', g, 'riposo il 12', 'off', true);
+  insert into gen_preferences (month, person_id, text) values ('2027-02', g, 'il martedì entro alle 10');
+  insert into gen_preferences (month, person_id, text) values ('2027-02', g, 'niente chiusure');
+  assert (select reviewed from gen_preferences where text = 'riposo il 12') = false, 'l''operatore non può segnarla come vista';
+  begin
+    insert into gen_preferences (month, person_id, text) values ('2027-02', g, 'quarta');
+    raise exception 'doveva fallire';
+  exception when others then
+    if sqlerrm = 'doveva fallire' then raise; end if;
+  end;
+  begin
+    insert into gen_preferences (month, person_id, text) values ('2027-02', (select id from people where email = 'marco.bianchi@azienda.it'), 'per Marco');
+    raise exception 'doveva fallire';
+  exception when others then
+    if sqlerrm = 'doveva fallire' then raise; end if;
+  end;
+  update people set shift_hours = 4 where id = g;
+  assert (select shift_hours from people where id = g) is null, 'profilo protetto';
+  begin
+    perform generator_save('{}'::jsonb);
+    raise exception 'doveva fallire';
+  exception when others then
+    if sqlerrm = 'doveva fallire' then raise; end if;
+  end;
+end $$;
+reset role;
+
+-- responsabile: salva profili, regole e bozza; le assenze restano, le settimane pubblicate no
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000c', false);
+set role authenticated;
+do $$
+declare
+  g uuid := (select id from people where email = 'giulia.rossi@azienda.it');
+  tel uuid := (select id from activity_types where name = 'Telefono');
+  fer uuid := (select id from activity_types where kind = 'absence' order by sort_order limit 1);
+  uf uuid := (select id from day_types where name = 'Ufficio');
+  res jsonb;
+begin
+  perform save_generator_profiles(jsonb_build_array(jsonb_build_object('id', g, 'shift_hours', 9, 'days_per_week', 5, 'gen_exclude', false, 'can_weekend', true)));
+  assert (select shift_hours from people where id = g) = 9, 'profilo salvato';
+  perform save_generator_config('{"officeDaysPerWeek":3}'::jsonb);
+  assert (select generator->>'officeDaysPerWeek' from settings) = '3', 'regole salvate';
+  update gen_preferences set kind = 'start_after', time_a = '10:00', weekday = 2, reviewed = true where text like 'il martedì%';
+  assert (select reviewed from gen_preferences where text like 'il martedì%'), 'responsabile conferma';
+
+  insert into events (person_id, activity_id, starts_at, ends_at) values
+    (g, tel, '2027-02-01 09:00+01', '2027-02-01 18:00+01'),
+    (g, fer, '2027-02-02 09:00+01', '2027-02-02 17:00+01');
+  res := generator_save(jsonb_build_object(
+    'from_date', '2027-02-01', 'to_date', '2027-02-28', 'persons', jsonb_build_array(g),
+    'rows', jsonb_build_array(
+      jsonb_build_object('person_id', g, 'activity_id', tel, 'starts_at', '2027-02-01 08:00+01', 'ends_at', '2027-02-01 17:00+01'),
+      jsonb_build_object('person_id', g, 'activity_id', tel, 'starts_at', '2027-03-01 08:00+01', 'ends_at', '2027-03-01 17:00+01')),
+    'marks', jsonb_build_array(jsonb_build_object('person_id', g, 'day', '2027-02-01', 'day_type_id', uf))));
+  assert (res->>'inserted')::int = 1 and (res->>'deleted')::int = 1, 'bozza: sostituito il turno, ignorato fuori periodo';
+  assert exists (select 1 from events where person_id = g and activity_id = fer and starts_at = '2027-02-02 09:00+01'), 'ferie conservate';
+  assert exists (select 1 from events where person_id = g and starts_at = '2027-02-01 08:00+01' and source = 'generator'), 'turno generato';
+  insert into schedule_weeks (week_start) values ('2027-02-08');
+  begin
+    perform generator_save(jsonb_build_object('from_date', '2027-02-01', 'to_date', '2027-02-14', 'persons', jsonb_build_array(g), 'rows', '[]'::jsonb));
+    raise exception 'doveva fallire';
+  exception when others then
+    if sqlerrm = 'doveva fallire' then raise; end if;
+  end;
+end $$;
+reset role;
+
 select 'TUTTI I TEST SQL PASSATI';
