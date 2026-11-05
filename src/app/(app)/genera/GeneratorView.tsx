@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import { addDays, fmtDay, localToUtc } from '@/lib/time';
 import { planBreaks, withDefaults, type BreakPolicy } from '@/lib/breaks';
 import {
-  generate, hhmm, isoWeekday, toMin,
+  generate, hhmm, isoWeekday, slotMinimaFor, toMin,
   type Absence, type FixedDay, type GenConfig, type GenPerson, type GenResult, type History, type Pref,
 } from '@/lib/generator';
 import { showToast } from '@/components/ui';
@@ -286,8 +286,13 @@ function Grid({ result, people, absences, holidays, config, onlyIssues, elsewher
     ['Aprono (operativi)', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.role === 'op' && s.start <= open).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.openOps],
     ['Chiudono (operativi)', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.role === 'op' && s.end >= close).length : ''), (d, v) => isoWeekday(d) <= 5 && v !== config.weekday.closeOps],
     ['Alle 9', (d) => result.shifts.filter((s) => s.day === d && s.role === 'op' && s.start <= 540 && s.end > 540).length, () => false],
-    ['Dopo le 18', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.role === 'op' && s.end > 1080).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.after1800],
-    ['Dopo le 18:30', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.role === 'op' && s.end > 1110).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.after1830],
+    ['Dopo le 18', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.role === 'op' && s.end > 1080).length : ''), (d, v) => isoWeekday(d) <= 5 && v < (slotMinimaFor(config, isoWeekday(d))[36] ?? 0)],
+    ['Dopo le 18:30', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.role === 'op' && s.end > 1110).length : ''), (d, v) => isoWeekday(d) <= 5 && v < (slotMinimaFor(config, isoWeekday(d))[37] ?? 0)],
+    ['Mezz’ore sotto il minimo', (d) => {
+      if (isoWeekday(d) > 5) return '';
+      const mins = slotMinimaFor(config, isoWeekday(d));
+      return mins.filter((m, i) => m !== null && m !== undefined && result.shifts.filter((s) => s.day === d && s.role === 'op' && s.start <= i * 30 + 15 && s.end > i * 30 + 15).length < m).length;
+    }, (d, v) => isoWeekday(d) <= 5 && v > 0],
     ['Posti in ufficio (picco)', (d) => (isoWeekday(d) <= 5 ? deskPeak(d) : ''), (d, v) => isoWeekday(d) <= 5 && v > (config.weekday.maxOffice ?? 12)],
     ['In ufficio apertura', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.start <= open && s.office && !elsewhere.has(s.person_id)).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.officeAtOpen],
     ['In ufficio chiusura', (d) => (isoWeekday(d) <= 5 ? result.shifts.filter((s) => s.day === d && s.end >= close && s.office && !elsewhere.has(s.person_id)).length : ''), (d, v) => isoWeekday(d) <= 5 && v < config.weekday.officeAtClose],

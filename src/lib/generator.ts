@@ -59,8 +59,10 @@ export interface GenConfig {
   maxSaturdaysPerMonth: number;
   activities: { phone: string | null; rec: string | null; reclami: string | null; sunday?: string | null };
   dayTypes: { office: string | null; remote: string | null };
-  /** operativi desiderati per fascia oraria: giorno della settimana (1–7) → 24 valori, uno per ora (null = nessuna preferenza) */
+  /** (non più usato per generare: solo confronto con il forecast) */
   targets?: Record<string, (number | null)[]>;
+  /** regola: operativi minimi per mezz'ora, giorno della settimana (1–5) → 48 valori (null = nessuna regola) */
+  slotMin?: Record<string, (number | null)[]>;
   /** regole particolari per persona */
   personRules?: Record<string, PersonRule>;
   /** assegnazioni scelte a mano per settimana (lunedì → persona) */
@@ -78,6 +80,19 @@ export const DEFAULT_GEN: GenConfig = {
   activities: { phone: null, rec: null, reclami: null },
   dayTypes: { office: null, remote: null },
 };
+
+/** minimi per mezz'ora di un giorno feriale; senza tabella valgono i vecchi campi (dopo le 18 / 18:30) */
+export function slotMinimaFor(c: GenConfig, wd: number): (number | null)[] {
+  const t = c.slotMin?.[String(wd)];
+  if (t && t.some((x) => x !== null && x !== undefined)) return Array.from({ length: 48 }, (_, i) => t[i] ?? null);
+  const out: (number | null)[] = new Array(48).fill(null);
+  const W = c.weekday;
+  out[toMin(W.open) / 30] = W.openOps;
+  out[36] = Math.max(W.after1800, W.closeOps); // 18:00
+  out[37] = Math.max(W.after1830, W.closeOps); // 18:30
+  for (let i = 38; i < toMin(W.close) / 30; i++) out[i] = W.closeOps; // 19:00 → chiusura
+  return out;
+}
 
 export function withGenDefaults(c?: Partial<GenConfig> | null): GenConfig {
   const x = c ?? {};
@@ -487,8 +502,10 @@ export function generate(input: {
       let closers = 0;
       for (let i = 0; i < W.closeOps; i++) {
         const cand = pool().filter((p) => !rules.get(p.id)!.noClose && fits(p, closeM - L(p), closeM));
-        const ok = cand.filter((p) => closesThisWeek(p.id) < W.maxClosePerWeek);
-        const list = (ok.length ? ok : cand).sort((a, b) => Number(rules.get(b.id)!.wantClose) - Number(rules.get(a.id)!.wantClose) || get(cnt.close, a.id) + noise() - (get(cnt.close, b.id) + noise()));
+        // chi ha chiesto la chiusura proprio oggi la fa comunque; chi la vuole in un altro giorno della settimana passa dopo
+        const wantsOther = (p: GenPerson) => (prefsOf.get(p.id) ?? []).some((q) => q.kind === 'want_close' && q.day && q.day !== d && q.day >= w && q.day < addDays(w, 7));
+        const ok = cand.filter((p) => closesThisWeek(p.id) < W.maxClosePerWeek || rules.get(p.id)!.wantClose);
+        const list = (ok.length ? ok : cand).sort((a, b) => Number(rules.get(b.id)!.wantClose) - Number(rules.get(a.id)!.wantClose) || Number(wantsOther(a)) - Number(wantsOther(b)) || get(cnt.close, a.id) + noise() - (get(cnt.close, b.id) + noise()));
         const p = list[0];
         if (!p) break;
         if (!ok.length) issues.push({ day: d, person_id: p.id, level: 'warn', text: `${p.name}: seconda chiusura della settimana` });
@@ -513,30 +530,33 @@ export function generate(input: {
       }
       if (openers < W.openOps) issues.push({ day: d, level: 'bad', text: `Apertura alle ${W.open}: ${openers} operativi su ${W.openOps}` });
 
-      // 3. sera: fino alle 19 e alle 18:30
-      const lateNeeds: [number, number][] = [
-        [toMin('19:00'), Math.max(0, W.after1830 - W.closeOps)],
-        [toMin('18:30'), Math.max(0, W.after1800 - Math.max(W.after1830, W.closeOps))],
-      ];
-      for (const [end, n] of lateNeeds) {
-        for (let i = 0; i < n; i++) {
-          const cand = pool()
-            .filter((p) => fits(p, end - L(p), end) && end - L(p) >= openM)
-            .sort((a, b) => L(b) - L(a) || get(cnt.late, a.id) + noise() - (get(cnt.late, b.id) + noise()));
-          const p = cand[0];
-          if (!p) break;
-          assign(p, end - L(p));
-          inc(cnt.late, p.id);
+      // 3. minimi per mezz'ora (regole): si coprono i buchi, dalla sera verso la mattina,
+      //    scegliendo per ognuno l'orario che chiude più buchi possibile
+      const minima = slotMinimaFor(c, isoDow(d));
+      const covered = (i: number) => dayShifts.filter((s) => s.role === 'op' && s.start <= i * 30 + 15 && s.end > i * 30 + 15).length;
+      const deficit = () => minima.map((m, i) => (m !== null && m !== undefined ? Math.max(0, m - covered(i)) : 0));
+      for (let guard = 0; guard < 60; guard++) {
+        const def = deficit();
+        const slot = def.map((x, i) => (x > 0 ? i : -1)).filter((i) => i >= 0).pop();
+        if (slot === undefined) break;
+        let best: { p: GenPerson; st: number; score: number } | null = null;
+        for (const p of pool()) {
+          for (let st = openM; st + L(p) <= closeM; st += 30) {
+            if (st > slot * 30 + 15 || st + L(p) <= slot * 30 + 15) continue; // deve coprire la fascia scoperta
+            if (!fits(p, st, st + L(p))) continue;
+            let gain = 0;
+            for (let i = Math.floor(st / 30); i * 30 < st + L(p); i++) if (def[i]! > 0 && i * 30 + 15 >= st && i * 30 + 15 < st + L(p)) gain++;
+            const score = gain * 10 - Math.abs(st - toMin('09:00')) / 120 - get(cnt.late, p.id) * (st + L(p) > toMin('18:00') ? 1 : 0) + noise();
+            if (!best || score > best.score) best = { p, st, score };
+          }
         }
+        if (!best) break;
+        assign(best.p, best.st);
+        if (best.st + L(best.p) > toMin('18:00')) inc(cnt.late, best.p.id);
       }
 
-      // 4. tutti gli altri: alle 9 (picco di chiamate) oppure, se ci sono gli operativi desiderati
-      //    per fascia oraria, dove mancano più persone
-      const target = c.targets?.[String(isoDow(d))];
-      const hasTarget = !!target?.some((x) => x !== null && x !== undefined);
-      const present = (h: number) => dayShifts.filter((s) => s.role === 'op' && s.start <= h * 60 + 15 && s.end > h * 60 + 15).length;
-      const rest = pool().sort((a, b) => L(b) - L(a)); // prima i turni lunghi
-      for (const p of rest) {
+      // 4. tutti gli altri alle 9 (picco di chiamate); chi ha vincoli di orario si adatta
+      for (const p of pool().sort((a, b) => L(b) - L(a))) {
         const r = rules.get(p.id)!;
         let start = toMin('09:00');
         if (p.maxStart) start = Math.min(start, toMin(p.maxStart));
@@ -544,28 +564,11 @@ export function generate(input: {
         if (r.startAfter !== null) start = Math.max(start, r.startAfter);
         if (r.endBy !== null && start + L(p) > r.endBy) start = Math.max(openM, r.endBy - L(p));
         if (start + L(p) > closeM) start = closeM - L(p);
-        if (hasTarget) {
-          let best = start, bestScore = -Infinity;
-          for (let st = openM; st + L(p) <= closeM; st += 30) {
-            if (!fits(p, st, st + L(p))) continue;
-            let score = 0;
-            for (let h = Math.floor(st / 60); h * 60 < st + L(p); h++) {
-              const want = target![h];
-              if (want === null || want === undefined) continue;
-              const mid = h * 60 + 15;
-              if (mid < st || mid >= st + L(p)) continue;
-              score += present(h) < want ? 10 : -1; // copre un buco · un'ora in più del necessario
-            }
-            score -= Math.abs(st - toMin('09:00')) / 600; // a parità, vicino alle 9
-            if (score > bestScore) { bestScore = score; best = st; }
-          }
-          start = best;
-        }
         assign(p, start);
       }
-      if (hasTarget) {
-        const short = Array.from({ length: 24 }, (_, h) => h).filter((h) => target![h] !== null && target![h] !== undefined && present(h) < target![h]!);
-        if (short.length) issues.push({ day: d, level: 'warn', text: `Sotto gli operativi desiderati alle ${short.map((h) => `${h} (${present(h)}/${target![h]})`).join(', ')}` });
+      {
+        const short = deficit().map((x, i) => (x > 0 ? i : -1)).filter((i) => i >= 0);
+        if (short.length) issues.push({ day: d, level: 'warn', text: `Sotto il minimo di operativi alle ${short.map((i) => `${hhmm(i * 30)} (${covered(i)}/${minima[i]})`).join(', ')}` });
       }
 
       // 5. Reclami: apre o chiude dove serve presenza
@@ -665,8 +668,7 @@ export function generate(input: {
     for (const d of wdFree) {
       const ops = weekShifts.filter((s) => s.day === d && s.role === 'op');
       const after = (t: number) => ops.filter((s) => s.end > t).length;
-      if (after(toMin('18:00')) < W.after1800) issues.push({ day: d, level: 'warn', text: `Dopo le 18: ${after(toMin('18:00'))} operativi (servono ${W.after1800})` });
-      if (after(toMin('18:30')) < W.after1830) issues.push({ day: d, level: 'warn', text: `Dopo le 18:30: ${after(toMin('18:30'))} operativi (servono ${W.after1830})` });
+      void after;
     }
     for (const p of people) {
       const n = closesThisWeek(p.id);

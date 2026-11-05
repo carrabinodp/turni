@@ -151,6 +151,7 @@ export default function DevPreview({ screen }: { screen: string }) {
                 holidays={[]}
                 publishedWeeks={[]}
                 existingInMonth={0}
+                forecastTargets={Object.fromEntries([1, 2, 3, 4, 5].map((wd) => [String(wd), Array.from({ length: 24 }, (_, h) => (h < 8 || h > 19 ? 0 : [3, 13, 15, 14, 12, 10, 12, 13, 12, 9, 6, 3][h - 8]! + (wd === 1 ? 2 : 0)))]))}
               />
             );
           })()

@@ -1,7 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { useAction } from '@/components/ui';
-import type { GenConfig } from '@/lib/generator';
+import { slotMinimaFor, type GenConfig } from '@/lib/generator';
 import { saveGenConfig } from './actions';
 import type { GActivity, GDayType, GPerson } from './GeneratorView';
 
@@ -32,18 +32,20 @@ export default function RulesForm({ config, people, activities, dayTypes, office
           <label className="field"><span>Chiusura</span>{time(W.close, (t) => setW('close', t))}</label>
           <label className="field"><span>Operativi che aprono</span>{num(W.openOps, (n) => setW('openOps', n))}</label>
           <label className="field"><span>Operativi che chiudono</span>{num(W.closeOps, (n) => setW('closeOps', n))}</label>
-          <label className="field"><span>Operativi dopo le 18</span>{num(W.after1800, (n) => setW('after1800', n))}</label>
-          <label className="field"><span>Operativi dopo le 18:30 (fino alle 19)</span>{num(W.after1830, (n) => setW('after1830', n))}</label>
           <label className="field"><span>Chiusure max a settimana a testa</span>{num(W.maxClosePerWeek, (n) => setW('maxClosePerWeek', n), 70, 0, 5)}</label>
           <label className="field"><span>In ufficio all’apertura</span>{num(W.officeAtOpen, (n) => setW('officeAtOpen', n))}</label>
           <label className="field"><span>In ufficio alla chiusura</span>{num(W.officeAtClose, (n) => setW('officeAtClose', n))}</label>
           <label className="field"><span>Massimo in ufficio al giorno</span>{num(W.maxOffice ?? 12, (n) => setW('maxOffice', n), 70, 1, 60)}</label>
           <div className="field"><span>Giorni in ufficio a settimana</span><div className="small" style={{ paddingTop: 8 }}><b>{officeDaysPerWeek}</b> · si cambia in Configura → Impostazioni</div></div>
         </div>
-        <p className="small muted" style={{ margin: 0, padding: '0 16px 12px' }}>Tutti gli altri entrano alle 9, l’ora con più chiamate, oppure dove mancano persone secondo la tabella qui sotto. REC, Reclami e affiancamento non contano tra gli operativi.</p>
+        <SlotRules c={c} setC={setC} forecastTargets={forecastTargets} />
+        <p className="small muted" style={{ margin: 0, padding: '0 16px 12px' }}>
+          “Aprono” e “chiudono” sono gli operativi che entrano alle {W.open} e escono alle {W.close}. La tabella è il minimo di operativi presenti in ogni mezz’ora: il generatore la rispetta e segnala dove non ci riesce.
+          Chi non serve a coprire i minimi entra alle 9, l’ora con più chiamate. REC, Reclami e affiancamento non contano tra gli operativi.
+        </p>
       </section>
 
-      <Targets c={c} setC={setC} forecastTargets={forecastTargets} />
+      <ForecastCheck c={c} forecastTargets={forecastTargets} />
 
       <section className="card">
         <div className="card-head"><b>Weekend e festivi</b></div>
@@ -150,51 +152,46 @@ export default function RulesForm({ config, people, activities, dayTypes, office
 }
 
 const DAYS = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven']; // sabato e domenica hanno le loro regole
-const HOURS = Array.from({ length: 13 }, (_, i) => 8 + i); // 8 … 20
+const hh = (i: number) => `${String(Math.floor(i / 2)).padStart(2, '0')}:${i % 2 ? '30' : '00'}`;
+const range = (c: GenConfig) => {
+  const a = Number(c.weekday.open.slice(0, 2)) * 2 + (c.weekday.open.slice(3) === '30' ? 1 : 0);
+  const b = Number(c.weekday.close.slice(0, 2)) * 2 + (c.weekday.close.slice(3) === '30' ? 1 : 0);
+  return Array.from({ length: Math.max(0, b - a) }, (_, i) => a + i);
+};
 
-/** operativi desiderati per fascia oraria (ora piena), per giorno della settimana */
-function Targets({ c, setC, forecastTargets }: { c: GenConfig; setC: (c: GenConfig) => void; forecastTargets: Record<string, number[]> | null }) {
-  const t = c.targets ?? {};
-  const get = (wd: number, h: number) => t[String(wd)]?.[h] ?? null;
-  const set = (wd: number, h: number, v: number | null) => {
-    const row = [...(t[String(wd)] ?? new Array(24).fill(null))];
-    row[h] = v;
-    setC({ ...c, targets: { ...t, [String(wd)]: row } });
+/** regola: operativi minimi per mezz'ora, per giorno */
+function SlotRules({ c, setC, forecastTargets }: { c: GenConfig; setC: (c: GenConfig) => void; forecastTargets: Record<string, number[]> | null }) {
+  const slots = range(c);
+  const rows = Object.fromEntries([1, 2, 3, 4, 5].map((wd) => [String(wd), slotMinimaFor(c, wd)]));
+  const set = (wd: number, i: number, v: number | null) => {
+    const next = { ...rows, [String(wd)]: rows[String(wd)]!.map((x, j) => (j === i ? v : x)) };
+    setC({ ...c, slotMin: next });
   };
-  const copyMon = () => setC({ ...c, targets: { ...t, ...Object.fromEntries([2, 3, 4, 5].map((wd) => [String(wd), [...(t['1'] ?? new Array(24).fill(null))]])) } });
+  const copyMon = () => setC({ ...c, slotMin: { ...rows, ...Object.fromEntries([2, 3, 4, 5].map((wd) => [String(wd), [...rows['1']!]])) } });
   const fromForecast = () => {
     if (!forecastTargets) return;
-    const next: Record<string, (number | null)[]> = {};
-    for (let wd = 1; wd <= 5; wd++) {
-      const f = forecastTargets[String(wd)];
-      next[String(wd)] = Array.from({ length: 24 }, (_, h) => (f && f[h]! > 0 && HOURS.includes(h) ? f[h]! : null));
-    }
-    setC({ ...c, targets: next });
+    setC({ ...c, slotMin: Object.fromEntries([1, 2, 3, 4, 5].map((wd) => [String(wd), Array.from({ length: 48 }, (_, i) => (slots.includes(i) ? Math.max(rows[String(wd)]![i] ?? 0, forecastTargets[String(wd)]?.[Math.floor(i / 2)] ?? 0) || null : null))])) });
   };
   return (
-    <section className="card">
-      <div className="card-head">
-        <b>Operativi desiderati per fascia oraria</b>
+    <div style={{ padding: '0 16px 8px' }}>
+      <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between', margin: '4px 0 6px' }}>
+        <b className="small">Operativi minimi per fascia oraria (regola)</b>
         <div className="row">
           <button className="btn btn-sm" onClick={copyMon}>Copia il lunedì su mar–ven</button>
-          <button className="btn btn-sm" disabled={!forecastTargets} title={forecastTargets ? 'Persone necessarie al telefono secondo il forecast del mese' : 'Carica le chiamate in Forecast per usarlo'} onClick={fromForecast}>Usa il forecast</button>
-          <button className="btn btn-sm btn-ghost" onClick={() => setC({ ...c, targets: {} })}>Svuota</button>
+          <button className="btn btn-sm" disabled={!forecastTargets} title={forecastTargets ? 'Alza i minimi dove il forecast chiede più persone' : 'Carica le chiamate in Forecast per usarlo'} onClick={fromForecast}>Alza ai valori del forecast</button>
         </div>
       </div>
       <div className="table-wrap">
         <table className="tg">
-          <thead><tr><th />{HOURS.map((h) => <th key={h}>{h}–{h + 1}</th>)}</tr></thead>
+          <thead><tr><th />{slots.map((i) => <th key={i} className={i % 2 ? 'half' : ''}>{i % 2 ? ':30' : hh(i).slice(0, 2)}</th>)}</tr></thead>
           <tbody>
-            {DAYS.map((d, i) => (
+            {DAYS.map((d, k) => (
               <tr key={d}>
                 <th>{d}</th>
-                {HOURS.map((h) => (
-                  <td key={h}>
-                    <input
-                      type="number" min={0} max={60} value={get(i + 1, h) ?? ''} aria-label={`${d} ${h}`}
-                      placeholder={forecastTargets?.[String(i + 1)]?.[h] ? String(forecastTargets[String(i + 1)]![h]) : ''}
-                      onChange={(e) => set(i + 1, h, e.target.value === '' ? null : Number(e.target.value))}
-                    />
+                {slots.map((i) => (
+                  <td key={i}>
+                    <input type="number" min={0} max={60} value={rows[String(k + 1)]![i] ?? ''} aria-label={`${d} ${hh(i)}`}
+                      onChange={(e) => set(k + 1, i, e.target.value === '' ? null : Number(e.target.value))} />
                   </td>
                 ))}
               </tr>
@@ -202,11 +199,43 @@ function Targets({ c, setC, forecastTargets }: { c: GenConfig; setC: (c: GenConf
           </tbody>
         </table>
       </div>
-      <p className="small muted" style={{ margin: 0, padding: '8px 16px 12px' }}>
-        Quante persone operative vorresti in ogni ora (REC e Reclami esclusi). Vuoto = nessuna preferenza. Il generatore mette prima aperture, chiusure e sera, poi distribuisce gli altri dove mancano più persone
-        e segnala le ore che restano sotto. In grigio i numeri del forecast, se ci sono le chiamate caricate.
-      </p>
-      <style dangerouslySetInnerHTML={{ __html: `.tg{border-collapse:collapse;margin:8px 12px;font-size:12.5px}.tg th{font-weight:500;color:var(--muted);padding:4px 6px;white-space:nowrap}.tg td{padding:2px}.tg input{width:46px;height:28px;border:1px solid var(--line);border-radius:4px;text-align:center;font:inherit}.tg input::placeholder{color:#b8bdc7}` }} />
+      <style dangerouslySetInnerHTML={{ __html: `.tg{border-collapse:collapse;font-size:12px}.tg th{font-weight:500;color:var(--muted);padding:3px 2px;white-space:nowrap;text-align:center}.tg th.half{font-size:10px;color:#a3a9b5}.tg td{padding:1px}.tg input{width:36px;height:28px;border:1px solid var(--line);border-radius:4px;text-align:center;font:inherit;padding:0}.tg td.ok{background:var(--ok-soft);color:var(--ok)}.tg td.bad{background:var(--bad-soft);color:var(--bad);font-weight:600}.tg td.cmp{min-width:46px;text-align:center;padding:5px 2px;border:1px solid #fff}` }} />
+    </div>
+  );
+}
+
+/** confronto: minimi delle regole contro persone necessarie secondo il forecast (solo lettura) */
+function ForecastCheck({ c, forecastTargets }: { c: GenConfig; forecastTargets: Record<string, number[]> | null }) {
+  const hours = Array.from(new Set(range(c).map((i) => Math.floor(i / 2))));
+  return (
+    <section className="card">
+      <div className="card-head"><b>Confronto con il forecast</b><span className="small muted">Solo da guardare: minimo delle regole / persone necessarie secondo il forecast del mese</span></div>
+      {!forecastTargets ? (
+        <div className="empty">Carica le chiamate in Forecast per vedere il confronto.</div>
+      ) : (
+        <div className="table-wrap" style={{ padding: '8px 16px' }}>
+          <table className="tg">
+            <thead><tr><th />{hours.map((h) => <th key={h}>{h}–{h + 1}</th>)}</tr></thead>
+            <tbody>
+              {DAYS.map((d, k) => {
+                const mins = slotMinimaFor(c, k + 1);
+                return (
+                  <tr key={d}>
+                    <th>{d}</th>
+                    {hours.map((h) => {
+                      const m = Math.max(mins[h * 2] ?? 0, mins[h * 2 + 1] ?? 0);
+                      const f = forecastTargets[String(k + 1)]?.[h] ?? 0;
+                      const cls = !f && !m ? '' : m >= f ? 'ok' : 'bad';
+                      return <td key={h} className={`cmp ${cls}`} title={`Regola ${m || '—'} · forecast ${f}`}>{m || '—'} / {f}</td>;
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p className="small muted" style={{ margin: '8px 0 0' }}>Rosso: la regola chiede meno persone di quelle che servono secondo le chiamate previste. Il generatore usa solo le regole; il resto delle persone entra alle 9.</p>
+        </div>
+      )}
     </section>
   );
 }

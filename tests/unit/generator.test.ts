@@ -253,3 +253,16 @@ test('posti in ufficio contati nello stesso momento; altra sede sempre in presen
   const office = r.shifts.filter((s) => s.office && isoWeekday(s.day) <= 5 && s.person_id !== 'vin' && s.day >= '2027-02-08' && s.day <= '2027-02-12').length;
   assert.ok(office > 60, `giornate in ufficio nella settimana: ${office}`);
 });
+
+test('minimi per mezz’ora come regola', () => {
+  const row: (number | null)[] = new Array(48).fill(null);
+  row[16] = 3; row[18] = 10; row[20] = 14; row[21] = 14; row[28] = 12; row[36] = 6; row[37] = 4; row[38] = 3; row[39] = 3;
+  const slotMin = Object.fromEntries([1, 2, 3, 4, 5].map((wd) => [String(wd), row]));
+  const r = generate({ month: '2027-02', people, config: withGenDefaults({ ...config, slotMin }), prefs: [], absences: [], fixed: [], history: empty });
+  for (const d of r.days.filter((x) => isoWeekday(x) <= 5)) {
+    const ops = r.shifts.filter((s) => s.day === d && s.role === 'op');
+    const at = (i: number) => ops.filter((s) => s.start <= i * 30 + 15 && s.end > i * 30 + 15).length;
+    for (const [i, m] of row.entries()) if (m !== null) assert.ok(at(i) >= m, `${d} ${i / 2}: ${at(i)} < ${m}`);
+  }
+  assert.ok(!r.issues.some((i) => i.text.startsWith('Sotto il minimo')));
+});
